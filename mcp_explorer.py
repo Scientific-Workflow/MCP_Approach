@@ -256,6 +256,21 @@ adapting your approach when things fail.
 - When all executable tasks are done, STOP and provide your final summary -- do not keep retrying failed tasks
 - Report what you accomplished and what failed in your final message
 
+## Scientific Integrity Rules (CRITICAL)
+
+- Do NOT generate synthetic, fake, or hardcoded data to simulate results from the paper
+- Do NOT fabricate timing data, performance benchmarks, or scaling measurements
+- Do NOT reproduce scaling plots, strong/weak scaling curves, or performance comparisons
+  that require HPC infrastructure (MPI, multi-node, SLURM) you do not have
+- ALL visualizations MUST use data produced by your own simulation runs in this session,
+  not values copied from the paper or invented to look plausible
+- If a task requires infrastructure you do not have (MPI, multi-node cluster, specific
+  HPC hardware), SKIP it and explain why in your summary
+- If the paper shows benchmark results on 40-1280 processes but you are running on a
+  single machine, do NOT simulate those benchmarks -- skip them
+- You CAN measure and plot actual single-machine timing of your own pipeline stages
+  (e.g. how long particle generation, analysis, and visualization took on this run)
+
 ## Data Layout Inside the Container
 
 - Input data: /app/data/ (source files)
