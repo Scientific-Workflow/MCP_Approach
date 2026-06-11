@@ -261,6 +261,17 @@ def orchestrator(state: AgentState) -> dict:
         result.next = "installer"
     elif state.get("current_step") == "installer_complete":
         result.next = "explorer"
+    elif state.get("current_step") == "explorer_complete":
+        # After explorer completes, check if key outputs exist before deciding to re-run.
+        # If the explorer produced results (even partial), prefer ending over re-running.
+        log = state.get("exploration_log", [])
+        successes = sum(1 for e in log if e.get("succeeded", False))
+        if successes > 0 and result.next == "explorer":
+            # Explorer already ran and produced some results -- check if re-run is justified
+            explorer_revs = state.get("explorer_revisions", 0)
+            if explorer_revs >= 1:
+                console.print("[dim yellow][orchestrator] explorer already revised once with results -- ending[/dim yellow]")
+                result.next = "end"
 
     panel_body = f"[bold]Routing to:[/bold] [green]{result.next}[/green]\n\n[bold]Reasoning:[/bold]\n{result.reasoning}"
     if result.feedback:
@@ -442,17 +453,45 @@ def installer(state: AgentState) -> dict:
             }
 
         else:
-            # __ Phase 1: read Dockerfile from disk, send to orchestrator for approval __
-            console.print("\n[dim cyan][installer] reading Dockerfile from disk...[/dim cyan]")
+            # __ Phase 1: read or generate Dockerfile, send to orchestrator for approval __
 
-            if not os.path.isfile(dockerfile_path):
-                raise FileNotFoundError(
-                    f"builds/Dockerfile not found at {dockerfile_path}. "
-                    "Place a Dockerfile there before running the agent."
-                )
+            if os.path.isfile(dockerfile_path):
+                # Use existing Dockerfile
+                console.print("\n[dim cyan][installer] reading existing Dockerfile from disk...[/dim cyan]")
+                with open(dockerfile_path) as _f:
+                    dockerfile = _f.read()
+            else:
+                # Auto-generate Dockerfile from planner's stack_decision
+                console.print("\n[dim cyan][installer] no Dockerfile found -- generating from stack_decision...[/dim cyan]")
+                stack = state.get("stack_decision", [])
+                pip_packages = [pkg for pkg in stack if pkg]
 
-            with open(dockerfile_path) as _f:
-                dockerfile = _f.read()
+                dockerfile_lines = [
+                    "FROM ubuntu:24.04",
+                    "ENV DEBIAN_FRONTEND=noninteractive",
+                    "",
+                    "# System dependencies",
+                    "RUN apt-get update && apt-get install -y \\",
+                    "    python3 python3-pip python3-dev build-essential \\",
+                    "    wget git \\",
+                    "    && rm -rf /var/lib/apt/lists/*",
+                    "",
+                    "# Python packages from planner stack_decision",
+                ]
+                for pkg in pip_packages:
+                    dockerfile_lines.append(
+                        f"RUN pip3 install {pkg} --break-system-packages"
+                    )
+                dockerfile_lines.extend([
+                    "",
+                    "WORKDIR /app",
+                ])
+                dockerfile = "\n".join(dockerfile_lines) + "\n"
+
+                # Write generated Dockerfile to disk
+                with open(dockerfile_path, "w") as f:
+                    f.write(dockerfile)
+                console.print(f"[dim cyan][installer] generated Dockerfile with {len(pip_packages)} packages[/dim cyan]")
 
             console.print(Panel(
                 dockerfile,

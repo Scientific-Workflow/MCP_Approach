@@ -247,10 +247,13 @@ adapting your approach when things fail.
 
 - Execute tasks in dependency order
 - Always verify output after each task
-- Max 3 retries per task before giving up
+- Max 3 retries per task before giving up -- then MOVE ON to the next task
+- Do NOT spend more than 3 attempts debugging any single issue (e.g. Qt rendering, display errors)
+- If a visualization/rendering task fails due to display/Qt/GUI issues, SKIP it and move to the next task
 - Use submit_task for Python code (ALL imports inside the script)
 - Use submit_shell_task for shell commands
 - Track task_ids from submit_task results for dependency chains
+- When all executable tasks are done, STOP and provide your final summary -- do not keep retrying failed tasks
 - Report what you accomplished and what failed in your final message
 
 ## Data Layout Inside the Container
@@ -339,9 +342,23 @@ async def _explorer_async(state: dict, engine: str) -> dict:
         # Load skill files
         _base_skill = _read_skill("agents/explorer")
         _uc_skill = ""
+        # Auto-detect use case: scan all use_cases/*/explorer.SKILL.md files,
+        # check if their description matches any package in stack_decision.
+        # This replaces the hardcoded 'if "lammps"' check.
         _stack_lower = [p.lower() for p in stack_decision]
-        if any("lammps" in p for p in _stack_lower):
-            _uc_skill = _read_skill("use_cases/molecular_nucleation/explorer")
+        _uc_dir = os.path.join(_SKILLS_ROOT, "use_cases")
+        if os.path.isdir(_uc_dir):
+            for uc_name in os.listdir(_uc_dir):
+                uc_skill_path = os.path.join(_uc_dir, uc_name, "explorer.SKILL.md")
+                if os.path.isfile(uc_skill_path):
+                    with open(uc_skill_path) as f:
+                        content = f.read()
+                    # Match if any stack package appears in the skill file description
+                    desc_lower = content[:500].lower()
+                    if any(pkg in desc_lower for pkg in _stack_lower):
+                        _uc_skill = content
+                        console.print(f"[dim cyan][explorer] loaded use case skill: {uc_name}[/dim cyan]")
+                        break
 
         system_prompt = EXPLORER_SYSTEM_PROMPT
         if _base_skill:

@@ -5,10 +5,12 @@ An MCP server that exposes Parsl workflow engine capabilities as tools.
 The explorer agent connects to this server via MCP protocol to submit tasks,
 check status, get results, and manage the workflow execution.
 
-Parsl runs inside the sandbox Docker container. This server manages:
-- A long-running sandbox container with Parsl runtime
-- Task submission and dependency tracking
-- Status monitoring and result retrieval
+This server executes tasks locally (or in a virtual environment) using subprocess.
+No Docker required. This makes it compatible with HPC environments and local
+development without containerization overhead.
+
+The VENV_PYTHON environment variable controls which Python interpreter to use.
+If set, tasks run in that virtualenv. If not, tasks run with the system Python.
 
 Usage:
     python servers/parsl_server.py                    # stdio mode (for MCP clients)
@@ -21,6 +23,7 @@ import json
 import subprocess
 import uuid
 import time
+import tempfile
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
@@ -33,72 +36,49 @@ mcp = FastMCP(
 
 # __ Configuration _____________________________________________________________
 
-HOST_REPO_PATH = os.environ.get(
-    "HOST_REPO_PATH",
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),  # repo root
+# Repo root -- used as base for relative paths
+REPO_ROOT = os.environ.get(
+    "REPO_ROOT",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 )
 
-DEFAULT_IMAGE = os.environ.get("SANDBOX_IMAGE", "maw-sandbox:latest")
-DEFAULT_WORK_DIR = "/app/work/run0"
+# Python interpreter to use for task execution.
+# Set VENV_PYTHON to a virtualenv's python binary to isolate execution.
+# e.g. VENV_PYTHON=/path/to/venv/bin/python
+# If not set, uses the same Python as the server.
+VENV_PYTHON = os.environ.get("VENV_PYTHON", sys.executable)
 
-SANDBOX_ENV = {
+# Default working directory for tasks
+DEFAULT_WORK_DIR = os.path.join(REPO_ROOT, "work", "run0")
+
+# Default data directory
+DEFAULT_DATA_DIR = os.path.join(REPO_ROOT, "data")
+
+# Environment variables passed to every task execution
+TASK_ENV = {
+    **os.environ,
     "LIBGL_ALWAYS_SOFTWARE": "1",
     "PYOPENGL_PLATFORM": "osmesa",
     "OVITO_GUI_MODE": "0",
 }
 
 # __ Task Registry _____________________________________________________________
-# Tracks submitted tasks and their status
 
 _tasks: dict[str, dict] = {}
-_container_id: Optional[str] = None
 
 
-# __ Container Management ______________________________________________________
+# __ Execution Helpers _________________________________________________________
 
-def _ensure_container(image_tag: str = DEFAULT_IMAGE) -> str:
-    """Ensure a long-running sandbox container exists. Return container ID."""
-    global _container_id
-
-    # Check if existing container is still running
-    if _container_id:
-        check = subprocess.run(
-            ["docker", "inspect", "--format", "{{.State.Running}}", _container_id],
-            capture_output=True, text=True,
-        )
-        if check.returncode == 0 and "true" in check.stdout.lower():
-            return _container_id
-
-    # Start a new long-running container
-    env_args = []
-    for key, val in SANDBOX_ENV.items():
-        env_args.extend(["-e", f"{key}={val}"])
-
-    proc = subprocess.run(
-        ["docker", "run", "-d",
-         "-v", f"{HOST_REPO_PATH}:/app",
-         "-w", DEFAULT_WORK_DIR,
-         *env_args,
-         image_tag,
-         "tail", "-f", "/dev/null"],  # keep container alive
-        capture_output=True, text=True,
-    )
-
-    if proc.returncode != 0:
-        raise RuntimeError(f"Failed to start sandbox container: {proc.stderr}")
-
-    _container_id = proc.stdout.strip()
-    return _container_id
-
-
-def _exec_in_container(cmd: list[str], timeout: int = 600) -> dict:
-    """Execute a command in the running sandbox container."""
-    container_id = _ensure_container()
+def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int = 600) -> dict:
+    """Execute a command locally (or in venv) and return results."""
+    os.makedirs(work_dir, exist_ok=True)
 
     try:
         proc = subprocess.run(
-            ["docker", "exec", container_id, *cmd],
+            cmd,
             capture_output=True, text=True,
+            cwd=work_dir,
+            env=TASK_ENV,
             timeout=timeout,
         )
         return {
@@ -112,26 +92,28 @@ def _exec_in_container(cmd: list[str], timeout: int = 600) -> dict:
             "stdout": "",
             "stderr": f"Command timed out after {timeout}s",
         }
-
-
-def _exec_python_in_container(script: str, timeout: int = 600) -> dict:
-    """Execute a Python script in the running sandbox container."""
-    container_id = _ensure_container()
-
-    # Write script to a temp file inside the container
-    script_path = "/tmp/_mcp_task_script.py"
-    write_proc = subprocess.run(
-        ["docker", "exec", "-i", container_id, "bash", "-c", f"cat > {script_path}"],
-        input=script, capture_output=True, text=True,
-    )
-    if write_proc.returncode != 0:
+    except Exception as e:
         return {
             "exit_code": -1,
             "stdout": "",
-            "stderr": f"Failed to write script: {write_proc.stderr}",
+            "stderr": str(e),
         }
 
-    return _exec_in_container(["python3", script_path], timeout=timeout)
+
+def _run_python_script(script: str, work_dir: str = DEFAULT_WORK_DIR, timeout: int = 600) -> dict:
+    """Write a Python script to a temp file and execute it with VENV_PYTHON."""
+    os.makedirs(work_dir, exist_ok=True)
+
+    # Write script to a temp file
+    fd, script_path = tempfile.mkstemp(suffix=".py", prefix="_mcp_task_", dir=work_dir)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(script)
+        return _run_command([VENV_PYTHON, script_path], work_dir=work_dir, timeout=timeout)
+    finally:
+        # Clean up temp script
+        if os.path.isfile(script_path):
+            os.remove(script_path)
 
 
 # __ MCP Tools _________________________________________________________________
@@ -145,7 +127,7 @@ def submit_task(
 ) -> str:
     """Submit a Python task for execution via the Parsl workflow engine.
 
-    The task runs as a Parsl @python_app inside the sandbox container.
+    The task runs locally using the configured Python interpreter (system or venv).
     If depends_on is specified, the task waits for those tasks to complete first.
 
     Args:
@@ -183,8 +165,7 @@ def submit_task(
         "submitted_at": time.time(),
     }
 
-    # Wrap user code in a Parsl-compatible script
-    # This initializes Parsl, runs the code as a @python_app, and captures output
+    # Wrap user code
     wrapped_script = f"""\
 import sys, os, traceback
 
@@ -203,8 +184,7 @@ except Exception as e:
     sys.exit(1)
 """
 
-    # Execute in container
-    result = _exec_python_in_container(wrapped_script, timeout=timeout)
+    result = _run_python_script(wrapped_script, timeout=timeout)
 
     # Update task status
     if result["exit_code"] == 0 and "__TASK_SUCCESS__" in result["stdout"]:
@@ -234,23 +214,24 @@ except Exception as e:
 def submit_shell_task(
     name: str,
     command: str,
-    work_dir: str = DEFAULT_WORK_DIR,
+    work_dir: str = "",
     timeout: int = 600,
 ) -> str:
-    """Submit a shell command for execution in the sandbox container.
+    """Submit a shell command for execution.
 
     Use this for file operations, system commands, and non-Python tasks.
 
     Args:
         name: Descriptive name for this task (e.g. "copy_data_files", "create_directories")
         command: Shell command to execute (e.g. "mkdir -p /app/work/run0/frames")
-        work_dir: Working directory inside the container
+        work_dir: Working directory (default: repo work/run0)
         timeout: Max seconds to wait
 
     Returns:
         JSON with task_id, status, and execution results
     """
     task_id = f"task_{uuid.uuid4().hex[:8]}"
+    _work = work_dir if work_dir else DEFAULT_WORK_DIR
 
     _tasks[task_id] = {
         "name": name,
@@ -259,10 +240,9 @@ def submit_shell_task(
         "submitted_at": time.time(),
     }
 
-    result = _exec_in_container(
-        ["bash", "-c", f"cd {work_dir} 2>/dev/null; {command}"],
-        timeout=timeout,
-    )
+    # Replace /app/ paths with actual repo paths for local execution
+    resolved_cmd = _resolve_paths(command)
+    result = _run_command(["bash", "-c", resolved_cmd], work_dir=_work, timeout=timeout)
 
     _tasks[task_id]["status"] = "completed" if result["exit_code"] == 0 else "failed"
     _tasks[task_id]["exit_code"] = result["exit_code"]
@@ -286,9 +266,6 @@ def get_task_status(task_id: str) -> str:
 
     Args:
         task_id: The task ID returned by submit_task or submit_shell_task
-
-    Returns:
-        JSON with task status, name, timing info
     """
     if task_id not in _tasks:
         return json.dumps({"error": f"Task {task_id} not found"})
@@ -300,12 +277,10 @@ def get_task_status(task_id: str) -> str:
         "status": task["status"],
         "depends_on": task["depends_on"],
     }
-
     if "exit_code" in task:
         info["exit_code"] = task["exit_code"]
     if "submitted_at" in task and "completed_at" in task:
         info["duration_seconds"] = round(task["completed_at"] - task["submitted_at"], 2)
-
     return json.dumps(info, indent=2)
 
 
@@ -315,9 +290,6 @@ def get_task_result(task_id: str) -> str:
 
     Args:
         task_id: The task ID returned by submit_task or submit_shell_task
-
-    Returns:
-        JSON with task output
     """
     if task_id not in _tasks:
         return json.dumps({"error": f"Task {task_id} not found"})
@@ -335,11 +307,7 @@ def get_task_result(task_id: str) -> str:
 
 @mcp.tool()
 def list_tasks() -> str:
-    """List all submitted tasks and their current status.
-
-    Returns:
-        JSON with list of all tasks
-    """
+    """List all submitted tasks and their current status."""
     task_list = []
     for task_id, task in _tasks.items():
         task_list.append({
@@ -348,31 +316,20 @@ def list_tasks() -> str:
             "status": task["status"],
             "depends_on": task["depends_on"],
         })
-
-    return json.dumps({
-        "total": len(task_list),
-        "tasks": task_list,
-    }, indent=2)
+    return json.dumps({"total": len(task_list), "tasks": task_list}, indent=2)
 
 
 @mcp.tool()
 def install_package(package: str) -> str:
-    """Install a pip package into the sandbox container.
-
-    The package is installed into the running container and persists
-    for the duration of the session.
+    """Install a pip package using the configured Python interpreter.
 
     Args:
         package: Package name to install (e.g. "numpy", "ovito==3.10.0")
-
-    Returns:
-        JSON with installation status
     """
-    result = _exec_in_container(
-        ["pip3", "install", package, "--break-system-packages"],
+    result = _run_command(
+        [VENV_PYTHON, "-m", "pip", "install", package],
         timeout=300,
     )
-
     return json.dumps({
         "package": package,
         "status": "success" if result["exit_code"] == 0 else "failed",
@@ -382,20 +339,16 @@ def install_package(package: str) -> str:
 
 @mcp.tool()
 def check_package(package: str) -> str:
-    """Check if a Python package is installed in the sandbox container.
+    """Check if a Python package is installed.
 
     Args:
         package: Package name to check (e.g. "numpy", "lammps", "ovito")
-
-    Returns:
-        JSON with installed status and version
     """
-    result = _exec_in_container(
-        ["python3", "-c",
+    result = _run_command(
+        [VENV_PYTHON, "-c",
          f"import {package}; v = getattr({package}, '__version__', 'unknown'); print(v)"],
         timeout=30,
     )
-
     if result["exit_code"] == 0:
         return json.dumps({
             "package": package,
@@ -411,88 +364,77 @@ def check_package(package: str) -> str:
 
 
 @mcp.tool()
-def list_files(directory: str = DEFAULT_WORK_DIR) -> str:
-    """List files in a directory inside the sandbox container.
+def list_files(directory: str = "") -> str:
+    """List files in a directory.
 
     Args:
-        directory: Path inside the container to list (default: /app/work/run0)
-
-    Returns:
-        JSON with list of files
+        directory: Path to list (default: work/run0). Supports /app/ paths which
+                   are automatically resolved to local repo paths.
     """
-    result = _exec_in_container(
-        ["find", directory, "-type", "f", "-name", "*"],
-        timeout=30,
-    )
+    resolved = _resolve_paths(directory) if directory else DEFAULT_WORK_DIR
 
-    if result["exit_code"] == 0:
-        files = sorted([f for f in result["stdout"].splitlines() if f.strip()])
+    if not os.path.isdir(resolved):
         return json.dumps({
-            "directory": directory,
-            "files": files,
-            "count": len(files),
-        }, indent=2)
-    else:
-        return json.dumps({
-            "directory": directory,
+            "directory": resolved,
             "files": [],
             "count": 0,
-            "error": result["stderr"],
+            "error": f"Directory not found: {resolved}",
         }, indent=2)
+
+    files = []
+    for root, dirs, filenames in os.walk(resolved):
+        for fname in filenames:
+            files.append(os.path.join(root, fname))
+
+    return json.dumps({
+        "directory": resolved,
+        "files": sorted(files),
+        "count": len(files),
+    }, indent=2)
 
 
 @mcp.tool()
 def read_file(path: str, max_lines: int = 100) -> str:
-    """Read the contents of a file inside the sandbox container.
+    """Read the contents of a file.
 
     Args:
-        path: Absolute path of the file inside the container
+        path: Path of the file. Supports /app/ paths which are automatically
+              resolved to local repo paths.
         max_lines: Maximum number of lines to return (default: 100)
-
-    Returns:
-        JSON with file content
     """
-    result = _exec_in_container(
-        ["bash", "-c", f"wc -l < '{path}' && head -n {max_lines} '{path}'"],
-        timeout=30,
-    )
+    resolved = _resolve_paths(path)
 
-    if result["exit_code"] == 0:
-        lines = result["stdout"].splitlines()
-        if lines:
-            total_lines = int(lines[0])
-            content = "\n".join(lines[1:])
-            return json.dumps({
-                "path": path,
-                "content": content,
-                "truncated": total_lines > max_lines,
-                "total_lines": total_lines,
-            }, indent=2)
-        return json.dumps({"path": path, "content": "", "truncated": False, "total_lines": 0}, indent=2)
-    else:
+    if not os.path.isfile(resolved):
         return json.dumps({
-            "path": path,
-            "error": result["stderr"],
+            "path": resolved,
+            "error": f"File not found: {resolved}",
+        }, indent=2)
+
+    try:
+        with open(resolved) as f:
+            all_lines = f.readlines()
+        total = len(all_lines)
+        content = "".join(all_lines[:max_lines])
+        return json.dumps({
+            "path": resolved,
+            "content": content,
+            "truncated": total > max_lines,
+            "total_lines": total,
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "path": resolved,
+            "error": str(e),
         }, indent=2)
 
 
 @mcp.tool()
 def cleanup() -> str:
-    """Stop and remove the sandbox container. Call this when the workflow is complete.
-
-    Returns:
-        JSON with cleanup status
-    """
-    global _container_id
-
-    if _container_id:
-        subprocess.run(["docker", "stop", _container_id], capture_output=True, timeout=30)
-        subprocess.run(["docker", "rm", "-f", _container_id], capture_output=True, timeout=10)
-        old_id = _container_id
-        _container_id = None
-        return json.dumps({"status": "cleaned up", "container_id": old_id})
-
-    return json.dumps({"status": "no container to clean up"})
+    """Clean up resources. For local execution, this just clears the task registry."""
+    global _tasks
+    count = len(_tasks)
+    _tasks = {}
+    return json.dumps({"status": "cleaned up", "tasks_cleared": count})
 
 
 # __ Helpers ___________________________________________________________________
@@ -501,6 +443,15 @@ def _indent(text: str, spaces: int) -> str:
     """Indent every line of text by the given number of spaces."""
     prefix = " " * spaces
     return "\n".join(prefix + line for line in text.splitlines())
+
+
+def _resolve_paths(text: str) -> str:
+    """Replace /app/ container paths with actual local repo paths.
+
+    The explorer and skill files use /app/data/, /app/work/run0/ etc.
+    which are container conventions. This resolves them to local paths.
+    """
+    return text.replace("/app/", REPO_ROOT + "/").replace("//", "/")
 
 
 # __ Main ______________________________________________________________________
