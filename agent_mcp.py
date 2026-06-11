@@ -1,0 +1,585 @@
+"""
+MCP Approach -- Multi-Agent Workflow (Tool-Calling Mode)
+
+This is the MCP approach entry point, independent from Docker-MAW's artifact approach.
+Instead of generating a complete workflow script (codegen) and executing it (executor),
+this approach uses an explorer agent that interactively calls tools to execute each
+workflow task step by step inside a Docker container.
+
+Pipeline:
+    orchestrator -> planner -> installer -> explorer -> end
+
+Usage:
+    python agent_mcp.py --paper 1 --goal "Reproduce this workflow..."
+    python agent_mcp.py --paper YildizO_RAPIDS.pdf --goal "..."
+"""
+
+import os
+import json
+import operator
+import subprocess
+import warnings
+from datetime import datetime
+from typing import Annotated, Literal, Sequence
+from typing_extensions import TypedDict
+from pydantic import BaseModel
+from pypdf import PdfReader
+warnings.filterwarnings("ignore", module="pypdf")
+from dotenv import load_dotenv
+from rich.console import Console
+from rich.panel import Panel
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
+
+from mcp_explorer import explorer
+
+load_dotenv()
+
+console = Console()
+
+_run_log_path: str = ""
+
+
+# __ LLM ______________________________________________________________________
+model = ChatOpenAI(model=os.getenv("MODEL_NAME", "claudesonnet46"))
+
+
+# __ Agent State _______________________________________________________________
+
+class AgentState(TypedDict):
+    messages:              Annotated[Sequence[BaseMessage], add_messages]
+    goal:                  str
+    pdf_path:              str
+    literature_findings:   list[str]
+    stack_decision:        list[str]
+    tasks:                 list[str]
+    exploration_log:       list[dict]       # explorer output (tool call records)
+    dockerfile:            str
+    dockerfile_approved:   bool
+    image_tag:             str
+    current_step:          str
+    orchestrator_feedback: str
+    next:                  str
+    planner_revisions:     int
+    installer_revisions:   int
+    explorer_revisions:    int
+    engine:                str              # workflow engine: "parsl", "pycompss", etc.
+
+
+# __ Pydantic Schemas __________________________________________________________
+
+class OrchestratorOutput(BaseModel):
+    reasoning:           str
+    next:                Literal["planner", "installer", "explorer", "end"]
+    feedback:            str
+    dockerfile_approved: bool = False
+    skill_requests:      list[str] = []
+
+class PlannerOutput(BaseModel):
+    literature_findings: list[str]
+    stack_decision:      list[str]
+    tasks:               list[str]
+    skill_requests:      list[str] = []
+
+class InstallerOutput(BaseModel):
+    dockerfile_content: str
+
+
+# __ Agent Prompts _____________________________________________________________
+
+ORCHESTRATOR_SYSTEM_PROMPT = """\
+Your agent skill file contains your full operating instructions. Follow them.
+
+Return ONLY a valid JSON object with exactly these keys:
+- reasoning:           str -- your analysis of the current state
+- next:                "planner" | "installer" | "explorer" | "end"
+- feedback:            str -- specific actionable feedback for the receiving agent, or "" if proceeding normally
+- dockerfile_approved: bool -- true ONLY when approving a pending Dockerfile, false in all other cases
+- skill_requests:      list[str] -- skill paths to load (first call only; empty on subsequent calls)
+\
+"""
+
+PLANNER_PROMPT = """\
+Your agent skill file contains your full operating instructions. Follow them.
+
+Return ONLY a valid JSON object with exactly these keys:
+- literature_findings: list[str] -- specific, quantitative facts extracted from the paper
+- stack_decision:      list[str] -- packages available in the sandbox Dockerfile only
+- tasks:               list[str] -- ordered, Python-API-level implementation steps
+- skill_requests:      list[str] -- skill paths to load (first call only; empty on subsequent calls)
+
+No markdown, no code fences, no explanation outside the JSON.
+
+HANDLING ORCHESTRATOR FEEDBACK:
+If the input ends with "Orchestrator feedback", fix every issue raised before returning.\
+"""
+
+
+# __ Project layout (injected into context) ____________________________________
+
+PROJECT_LAYOUT = """\
+Repo directory tree -- the repo root is always mounted at /app inside every container:
+
+/app/                                  <- repo root
++-- agent_mcp.py
++-- mcp_tools.py
++-- mcp_explorer.py
++-- Dockerfile                         <- agent container image definition
++-- requirements.txt
++-- .env
++-- data/
+|   +-- in.watbox                      <- LAMMPS input script
+|   +-- data.init                      <- LAMMPS initial atom positions
+|   +-- AW.tersoff                     <- LAMMPS force field parameters
++-- Literature/
+|   +-- *.pdf
++-- builds/                            <- installer-generated Dockerfile
+|   +-- Dockerfile                     <- sandbox image definition
++-- work/                              <- explorer output goes here
+    +-- run0/                          <- default working directory
+\
+"""
+
+# Host-side repo path for Docker bind mounts.
+HOST_REPO_PATH = os.environ.get("HOST_REPO_PATH", os.path.dirname(os.path.abspath(__file__)))
+
+
+# __ Structured output helper __________________________________________________
+
+def _invoke_structured(llm, schema, messages, retries=5):
+    """Call llm and parse the response as schema, tolerating preamble text before the JSON block."""
+    import json as _json, re as _re
+    last_err = None
+    for attempt in range(retries):
+        response = llm.invoke(messages)
+        text = response.content if hasattr(response, "content") else str(response)
+        match = _re.search(r'\{.*\}', text, _re.DOTALL)
+        if not match:
+            last_err = ValueError(f"No JSON object found in model response:\n{text[:500]}")
+            console.print(f"[yellow][_invoke_structured] attempt {attempt+1}: no JSON found, retrying...[/yellow]")
+            continue
+        try:
+            return schema.model_validate(_json.loads(match.group(0)))
+        except (_json.JSONDecodeError, Exception) as e:
+            last_err = e
+            console.print(f"[yellow][_invoke_structured] attempt {attempt+1}: parse error ({e}), retrying...[/yellow]")
+    raise last_err
+
+
+# __ Skill file helpers ________________________________________________________
+
+_SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
+
+def _read_skill(rel_path: str) -> str:
+    """Read skills/<rel_path>.SKILL.md -- returns '' if not found."""
+    full = os.path.join(_SKILLS_ROOT, rel_path + ".SKILL.md")
+    if os.path.isfile(full):
+        with open(full) as f:
+            return f.read()
+    return ""
+
+def _list_skills(folder: str) -> list:
+    """List available names in skills/<folder>/: subdirectory names AND .SKILL.md base names."""
+    d = os.path.join(_SKILLS_ROOT, folder)
+    if not os.path.isdir(d):
+        return []
+    results = []
+    for name in os.listdir(d):
+        if os.path.isdir(os.path.join(d, name)):
+            results.append(name)
+        elif name.endswith(".SKILL.md"):
+            results.append(os.path.splitext(name)[0])
+    return results
+
+
+# __ Nodes _____________________________________________________________________
+
+def orchestrator(state: AgentState) -> dict:
+    console.print("\n[dim cyan][orchestrator] reviewing state...[/dim cyan]")
+
+    revisions = {
+        "planner":   state.get("planner_revisions",   0),
+        "installer": state.get("installer_revisions", 0),
+        "explorer":  state.get("explorer_revisions",  0),
+    }
+    if any(revisions.values()):
+        rev_str = " | ".join(f"{k}: {v}" for k, v in revisions.items() if v > 0)
+        console.print(f"[dim yellow][orchestrator] revision counts -- {rev_str}[/dim yellow]")
+
+    parts = [f"Goal: {state['goal']}", f"Current step: {state['current_step']}"]
+    if state.get("literature_findings"):
+        parts.append(f"Literature findings ({len(state['literature_findings'])} items):\n" +
+                     "\n".join(f"  - {f}" for f in state["literature_findings"]))
+    if state.get("stack_decision"):
+        parts.append(f"Stack: {state['stack_decision']}")
+    if state.get("tasks"):
+        parts.append(f"Tasks ({len(state['tasks'])}):\n" +
+                     "\n".join(f"  {i+1}. {t}" for i, t in enumerate(state["tasks"])))
+    if state.get("dockerfile"):
+        parts.append(f"Dockerfile:\n{state['dockerfile']}")
+    if state.get("exploration_log"):
+        # Summarize exploration log for orchestrator
+        log = state["exploration_log"]
+        total = len(log)
+        successes = sum(1 for e in log if e.get("succeeded", False))
+        failures = total - successes
+        parts.append(f"Exploration: {total} tool calls, {successes} succeeded, {failures} failed")
+        # Include last few entries for detail
+        for entry in log[-5:]:
+            status_str = "OK" if entry.get("succeeded", False) else "FAILED"
+            parts.append(f"  [{entry['tool']}] {status_str} - {entry.get('result', '')[:200]}")
+
+    # Build system prompt: base skill + available skill index + core prompt
+    _base = _read_skill("agents/orchestrator")
+    _uc = _list_skills("use_cases")
+    _sys = _list_skills("systems")
+    _index = (f"\n\nAvailable skill contexts (set in skill_requests to load):"
+              f"\n  use_cases: {_uc}  -- request as \"use_cases/<name>/orchestrator\""
+              f"\n  systems:   {_sys}  -- request as \"systems/<name>\"") if (_uc or _sys) else ""
+    _sys_prompt = (_base + _index + "\n\n---\n\n" + ORCHESTRATOR_SYSTEM_PROMPT) if _base else ORCHESTRATOR_SYSTEM_PROMPT
+    _human = "\n\n".join(parts)
+
+    result: OrchestratorOutput = _invoke_structured(model, OrchestratorOutput, [
+        SystemMessage(content=_sys_prompt),
+        HumanMessage(content=_human),
+    ])
+
+    # Two-pass: if sub-skills requested, load them and re-invoke once
+    if result.skill_requests:
+        _sub = "\n\n".join(filter(None, (_read_skill(r) for r in result.skill_requests)))
+        if _sub:
+            _enriched = _sys_prompt + f"\n\n=== Loaded Skills ===\n{_sub}\n\n(Final pass -- do not set skill_requests.)"
+            result = _invoke_structured(model, OrchestratorOutput, [
+                SystemMessage(content=_enriched),
+                HumanMessage(content=_human),
+            ])
+
+    # Hard overrides: lock routing at deterministic transition points
+    if state.get("current_step") == "installer_dockerfile_pending_approval":
+        result.next = "installer"
+    elif state.get("current_step") == "installer_complete":
+        result.next = "explorer"
+
+    panel_body = f"[bold]Routing to:[/bold] [green]{result.next}[/green]\n\n[bold]Reasoning:[/bold]\n{result.reasoning}"
+    if result.feedback:
+        panel_body += f"\n\n[bold]Feedback to {result.next}:[/bold]\n[yellow]{result.feedback}[/yellow]"
+    console.print(Panel(panel_body, title="[bold cyan]Orchestrator Decision[/bold cyan]", border_style="cyan"))
+
+    if _run_log_path:
+        with open(_run_log_path, "a") as _lf:
+            _lf.write(json.dumps({
+                "ts":         datetime.now().isoformat(),
+                "from_step":  state.get("current_step"),
+                "routing_to": result.next,
+                "revisions":  revisions,
+                "feedback":   result.feedback,
+                "reasoning":  result.reasoning[:500],
+            }) + "\n")
+
+    already_ran = {
+        "planner":   bool(state.get("literature_findings")),
+        "installer": bool(state.get("dockerfile")),
+        "explorer":  bool(state.get("exploration_log")),
+    }
+    revision_update = {}
+    if result.next in already_ran and already_ran[result.next]:
+        key = f"{result.next}_revisions"
+        revision_update[key] = state.get(key, 0) + 1
+        console.print(f"[bold yellow][orchestrator] revision #{revision_update[key]} for {result.next}[/bold yellow]")
+
+    return {
+        "next":                  result.next,
+        "orchestrator_feedback": result.feedback,
+        "dockerfile_approved":   result.dockerfile_approved,
+        "current_step":          f"orchestrator_routed_to_{result.next}",
+        **revision_update,
+    }
+
+
+def planner(state: AgentState) -> dict:
+    try:
+        console.print("\n[dim cyan][planner] reading PDF...[/dim cyan]")
+
+        reader = PdfReader(state["pdf_path"])
+        pdf_text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
+        console.print(f"[dim cyan][planner] loaded {len(reader.pages)} pages[/dim cyan]")
+
+        feedback = state.get("orchestrator_feedback", "")
+        feedback_section = (f"\n\nOrchestrator feedback -- address these issues before returning:\n{feedback}"
+                            if feedback else "")
+
+        # Build system prompt: base skill + available skill index + core prompt
+        _base = _read_skill("agents/planner")
+        _uc = _list_skills("use_cases")
+        _sys = _list_skills("systems")
+        _index = (f"\n\nAvailable skill contexts (set in skill_requests to load):"
+                  f"\n  use_cases: {_uc}  -- request as \"use_cases/<name>/planner\""
+                  f"\n  systems:   {_sys}  -- request as \"systems/<name>\"") if (_uc or _sys) else ""
+        _sys_prompt = (_base + _index + "\n\n---\n\n" + PLANNER_PROMPT) if _base else PLANNER_PROMPT
+        _human = f"Goal: {state['goal']}\n\nPaper:\n{pdf_text}{feedback_section}"
+
+        result: PlannerOutput = _invoke_structured(model, PlannerOutput, [
+            SystemMessage(content=_sys_prompt),
+            HumanMessage(content=_human),
+        ])
+
+        # Two-pass: if sub-skills requested, load them and re-invoke once
+        if result.skill_requests:
+            _sub = "\n\n".join(filter(None, (_read_skill(r) for r in result.skill_requests)))
+            if _sub:
+                _enriched = _sys_prompt + f"\n\n=== Loaded Skills ===\n{_sub}\n\n(Final pass -- do not set skill_requests.)"
+                result = _invoke_structured(model, PlannerOutput, [
+                    SystemMessage(content=_enriched),
+                    HumanMessage(content=_human),
+                ])
+
+        console.print(f"[dim cyan][planner] produced {len(result.tasks)} tasks[/dim cyan]")
+
+        findings = "\n".join(f"  [cyan]*[/cyan] {f}" for f in result.literature_findings)
+        stack    = "\n".join(f"  [cyan]*[/cyan] {s}" for s in result.stack_decision)
+        tasks    = "\n".join(f"  [bold]{i+1}.[/bold] {t}" for i, t in enumerate(result.tasks))
+        console.print(Panel(
+            f"[bold]Literature Findings[/bold]\n{findings}\n\n"
+            f"[bold]Stack[/bold]\n{stack}\n\n"
+            f"[bold]Tasks[/bold]\n{tasks}",
+            title="[bold green]Planner Output[/bold green]",
+            border_style="green",
+        ))
+
+        return {
+            "literature_findings": result.literature_findings,
+            "stack_decision":      result.stack_decision,
+            "tasks":               result.tasks,
+            "current_step":        "planner_complete",
+        }
+    except Exception as e:
+        console.print(f"[red][planner] ERROR: {e}[/red]")
+        raise
+
+
+def installer(state: AgentState) -> dict:
+    try:
+        build_dir       = os.path.join(os.path.dirname(os.path.abspath(__file__)), "builds")
+        os.makedirs(build_dir, exist_ok=True)
+        dockerfile_path = os.path.join(build_dir, "Dockerfile")
+        image_tag       = "maw-sandbox:latest"
+
+        # __ Early exit: if the sandbox image already exists, skip installer __
+        _image_exists = subprocess.run(
+            ["docker", "inspect", image_tag], capture_output=True,
+        ).returncode == 0
+        if _image_exists:
+            console.print("[dim cyan][installer] sandbox image already exists -- skipping installer[/dim cyan]")
+            _existing = ""
+            if os.path.isfile(dockerfile_path):
+                with open(dockerfile_path) as _f:
+                    _existing = _f.read()
+            return {
+                "dockerfile":   _existing,
+                "image_tag":    image_tag,
+                "current_step": "installer_complete",
+            }
+
+        if state.get("dockerfile_approved"):
+            # __ Phase 2: Dockerfile approved -- build the image __
+            import shutil, hashlib
+            docker_available = shutil.which("docker") is not None
+
+            if not docker_available:
+                console.print(
+                    "[yellow][installer] docker not found. "
+                    "Skipping image build -- Dockerfile written. "
+                    "Run 'docker build -t maw-sandbox:latest -f builds/Dockerfile .' to build.[/yellow]"
+                )
+                return {
+                    "image_tag":    image_tag,
+                    "current_step": "installer_complete",
+                }
+
+            # __ skip rebuild if Dockerfile unchanged and image already exists __
+            hash_file = os.path.join(build_dir, ".dockerfile_hash")
+            with open(dockerfile_path) as f:
+                current_content = f.read()
+            current_hash = hashlib.md5(current_content.encode()).hexdigest()
+
+            image_exists = subprocess.run(
+                ["docker", "inspect", image_tag], capture_output=True,
+            ).returncode == 0
+
+            stored_hash = ""
+            if os.path.isfile(hash_file):
+                with open(hash_file) as f:
+                    stored_hash = f.read().strip()
+
+            if current_hash == stored_hash and image_exists:
+                console.print("[dim cyan][installer] Dockerfile unchanged and image exists -- skipping rebuild[/dim cyan]")
+                return {
+                    "image_tag":    image_tag,
+                    "current_step": "installer_complete",
+                }
+
+            console.print("[dim cyan][installer] Dockerfile approved -- building Docker image (this may take several minutes)...[/dim cyan]")
+
+            build_context = os.path.dirname(os.path.abspath(__file__))
+            proc = subprocess.run(
+                ["docker", "build", "--network=host", "-t", image_tag, "-f", dockerfile_path, build_context],
+                capture_output=True, text=True,
+                timeout=1800,
+            )
+
+            if proc.returncode != 0:
+                raise RuntimeError(f"docker build failed (exit {proc.returncode}):\n{proc.stderr[-3000:]}")
+
+            with open(hash_file, "w") as f:
+                f.write(current_hash)
+
+            console.print(f"[dim cyan][installer] image built: {image_tag}[/dim cyan]")
+            return {
+                "image_tag":    image_tag,
+                "current_step": "installer_complete",
+            }
+
+        else:
+            # __ Phase 1: read Dockerfile from disk, send to orchestrator for approval __
+            console.print("\n[dim cyan][installer] reading Dockerfile from disk...[/dim cyan]")
+
+            if not os.path.isfile(dockerfile_path):
+                raise FileNotFoundError(
+                    f"builds/Dockerfile not found at {dockerfile_path}. "
+                    "Place a Dockerfile there before running the agent."
+                )
+
+            with open(dockerfile_path) as _f:
+                dockerfile = _f.read()
+
+            console.print(Panel(
+                dockerfile,
+                title="[bold yellow]Dockerfile -- Pending Orchestrator Approval[/bold yellow]",
+                border_style="yellow",
+            ))
+            console.print("[dim yellow][installer] Dockerfile written -- waiting for orchestrator approval before building image...[/dim yellow]")
+
+            return {
+                "dockerfile":   dockerfile,
+                "current_step": "installer_dockerfile_pending_approval",
+            }
+
+    except Exception as e:
+        console.print(f"[red][installer] ERROR: {e}[/red]")
+        raise
+
+
+# __ Graph _____________________________________________________________________
+
+def route_orchestrator(state: AgentState) -> str:
+    return state["next"]
+
+
+graph = StateGraph(AgentState)
+
+graph.add_node("orchestrator", orchestrator)
+graph.add_node("planner",      planner)
+graph.add_node("installer",    installer)
+graph.add_node("explorer",     explorer)
+
+graph.set_entry_point("orchestrator")
+
+graph.add_conditional_edges("orchestrator", route_orchestrator, {
+    "planner":   "planner",
+    "installer": "installer",
+    "explorer":  "explorer",
+    "end":       END,
+})
+
+graph.add_edge("planner",   "orchestrator")
+graph.add_edge("installer", "orchestrator")
+graph.add_edge("explorer",  "orchestrator")
+
+app = graph.compile()
+
+
+# __ Run _______________________________________________________________________
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="MAW -- Multi-Agent Workflow (MCP Approach)")
+    parser.add_argument("--paper", type=str, help="Path to the PDF paper or paper index (1-based)")
+    parser.add_argument("--goal", type=str, help="Goal for the workflow")
+    parser.add_argument("--engine", type=str, default="parsl",
+                        choices=["parsl"],  # add "pycompss", "adios" as they're implemented
+                        help="Workflow engine to use (default: parsl)")
+    args = parser.parse_args()
+
+    console.print(Panel(f"[bold blue]MAW -- Multi-Agent Workflow (MCP Approach)[/bold blue]\n[dim]Engine: {args.engine}[/dim]", border_style="blue"))
+
+    lit_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Literature")
+    os.makedirs(lit_dir, exist_ok=True)
+
+    pdfs = [f for f in os.listdir(lit_dir) if f.lower().endswith(".pdf")]
+    if not pdfs:
+        console.print("[red]No PDFs found in the Literature/ folder. Add a paper and try again.[/red]")
+        raise SystemExit(1)
+
+    console.print("\n[bold]Available papers:[/bold]")
+    for i, name in enumerate(pdfs, 1):
+        console.print(f"  {i}. {name}")
+
+    # Handle paper selection
+    if args.paper:
+        choice = args.paper
+        try:
+            pdf_path = os.path.join(lit_dir, pdfs[int(choice) - 1])
+        except (ValueError, IndexError):
+            pdf_path = os.path.join(lit_dir, choice)
+            if not os.path.isfile(pdf_path):
+                console.print(f"[red]Paper not found: {choice}[/red]")
+                raise SystemExit(1)
+    else:
+        choice = input("\nSelect a paper by number: ").strip()
+        try:
+            pdf_path = os.path.join(lit_dir, pdfs[int(choice) - 1])
+        except (ValueError, IndexError):
+            console.print("[red]Invalid selection.[/red]")
+            raise SystemExit(1)
+
+    console.print(f"[dim]Selected: {os.path.basename(pdf_path)}[/dim]")
+
+    # Handle goal
+    if args.goal:
+        goal = args.goal
+    else:
+        goal = input("\nDescribe your goal for this workflow: ").strip()
+
+    if not goal:
+        console.print("[red]Goal cannot be empty.[/red]")
+        raise SystemExit(1)
+
+    runs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs")
+    os.makedirs(runs_dir, exist_ok=True)
+    _run_log_path = os.path.join(runs_dir, datetime.now().strftime("%Y%m%d_%H%M%S") + ".jsonl")
+    console.print(f"[dim]Run log: {_run_log_path}[/dim]")
+
+    initial_state = {
+        "messages":              [],
+        "goal":                  goal,
+        "pdf_path":              pdf_path,
+        "literature_findings":   [],
+        "stack_decision":        [],
+        "tasks":                 [],
+        "exploration_log":       [],
+        "dockerfile":            "",
+        "dockerfile_approved":   False,
+        "image_tag":             "",
+        "current_step":          "start",
+        "orchestrator_feedback": "",
+        "next":                  "",
+        "planner_revisions":     0,
+        "installer_revisions":   0,
+        "explorer_revisions":    0,
+        "engine":                args.engine,
+    }
+
+    app.invoke(initial_state)

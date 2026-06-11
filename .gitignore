@@ -1,0 +1,7 @@
+builds/runinfo/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+work/
+runs/
