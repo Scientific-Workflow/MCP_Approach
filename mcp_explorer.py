@@ -73,7 +73,7 @@ def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
 
 
 @tool
-def submit_task(name: str, python_code: str, depends_on: list[str] | None = None, timeout: int = 600) -> str:
+def submit_task(name: str, python_code: str, depends_on: list[str] | None = None, timeout: int = 1800) -> str:
     """Submit a Python task for execution via the workflow engine.
 
     The task runs inside the sandbox container. Write complete, self-contained
@@ -92,7 +92,7 @@ def submit_task(name: str, python_code: str, depends_on: list[str] | None = None
 
 
 @tool
-def submit_shell_task(name: str, command: str, work_dir: str = "/app/work/run0", timeout: int = 600) -> str:
+def submit_shell_task(name: str, command: str, work_dir: str = "/app/work/run0", timeout: int = 1800) -> str:
     """Submit a shell command for execution in the sandbox container.
 
     Use this for file operations, system commands, and non-Python tasks.
@@ -413,6 +413,7 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                 ))
                 break
 
+            mcp_broken = False
             for tool_call in response.tool_calls:
                 tool_name = tool_call["name"]
                 tool_args = tool_call["args"]
@@ -420,14 +421,30 @@ async def _explorer_async(state: dict, engine: str) -> dict:
 
                 console.print(f"[dim cyan][explorer] calling tool: {tool_name}({json.dumps(tool_args, indent=2)[:200]})[/dim cyan]")
 
-                # Call MCP tool directly via session (async, no thread overhead)
+                # Call MCP tool with timeout protection
                 try:
-                    mcp_result = await session.call_tool(tool_name, tool_args)
+                    mcp_result = await asyncio.wait_for(
+                        session.call_tool(tool_name, tool_args),
+                        timeout=1800,  # 30 min max per tool call
+                    )
                     if mcp_result.content:
                         texts = [block.text for block in mcp_result.content if hasattr(block, "text")]
                         tool_result = "\n".join(texts) if texts else "{}"
                     else:
                         tool_result = "{}"
+                except asyncio.TimeoutError:
+                    tool_result = json.dumps({
+                        "error": f"Tool call timed out after 1800s",
+                        "status": "timeout",
+                    })
+                    console.print(f"[bold red][explorer] {tool_name} timed out -- skipping[/bold red]")
+                except (BrokenPipeError, ConnectionError, EOFError) as e:
+                    tool_result = json.dumps({
+                        "error": f"MCP connection lost: {e}",
+                        "status": "connection_lost",
+                    })
+                    console.print(f"[bold red][explorer] MCP connection lost -- ending exploration[/bold red]")
+                    mcp_broken = True
                 except Exception as e:
                     tool_result = json.dumps({"error": str(e)})
 
@@ -494,6 +511,15 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                 console.print(f"[{color}][explorer] {tool_name} -> {display_status}[/{color}]")
 
                 messages.append(ToolMessage(content=tool_result, tool_call_id=tool_id))
+
+                # If MCP connection is broken, stop the tool loop
+                if mcp_broken:
+                    break
+
+            # If MCP connection is broken, stop the iteration loop
+            if mcp_broken:
+                console.print("[bold yellow][explorer] MCP connection lost -- ending with partial results[/bold yellow]")
+                break
 
         else:
             console.print("[bold red][explorer] hit max iterations limit[/bold red]")

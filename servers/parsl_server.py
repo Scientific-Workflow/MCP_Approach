@@ -69,7 +69,7 @@ _tasks: dict[str, dict] = {}
 
 # __ Execution Helpers _________________________________________________________
 
-def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int = 600) -> dict:
+def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
     """Execute a command locally (or in venv) and return results."""
     os.makedirs(work_dir, exist_ok=True)
 
@@ -100,7 +100,7 @@ def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int 
         }
 
 
-def _run_python_script(script: str, work_dir: str = DEFAULT_WORK_DIR, timeout: int = 600) -> dict:
+def _run_python_script(script: str, work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
     """Write a Python script to a temp file and execute it with VENV_PYTHON."""
     os.makedirs(work_dir, exist_ok=True)
 
@@ -123,7 +123,7 @@ def submit_task(
     name: str,
     python_code: str,
     depends_on: list[str] | None = None,
-    timeout: int = 600,
+    timeout: int = 1800,
 ) -> str:
     """Submit a Python task for execution via the Parsl workflow engine.
 
@@ -215,7 +215,7 @@ def submit_shell_task(
     name: str,
     command: str,
     work_dir: str = "",
-    timeout: int = 600,
+    timeout: int = 1800,
 ) -> str:
     """Submit a shell command for execution.
 
