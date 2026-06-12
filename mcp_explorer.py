@@ -273,6 +273,10 @@ adapting your approach when things fail.
 
 ## Data Layout (MANDATORY -- do not deviate)
 
+NOTE: /app/ paths are automatically resolved to the local repo directory at runtime.
+You do not need an actual /app/ folder. Always use /app/ paths in your code --
+the MCP server translates them to the correct local paths.
+
 - Input data: /app/data/ (source files)
 - Working directory: /app/work/run0/ (ALL output goes here)
 - ALL output files, subdirectories, scripts, and results MUST be placed under /app/work/run0/
