@@ -39,20 +39,21 @@ Load when planning a molecular nucleation or water crystallization workflow. Pro
 
 ---
 
-## Stack Decision — Constrained to Dockerfile
+## Stack Decision — Available in Local Venv
 
-The sandbox Dockerfile provides EXACTLY these packages. Use only these:
+The local venv provides EXACTLY these pip-installable packages. Use only these:
 
 | Package | Version constraint |
 |---|---|
-| lammps | (source-built, no version flag needed) |
 | ovito | (latest installed) |
 | parsl | `parsl>=2024.0.0` |
 | numpy | (latest installed) |
 | matplotlib | (latest installed) |
 | Pillow | (required for GIF generation) |
 
-**Do NOT add:** scipy, ase, mdanalysis, mpi4py, h5py, or any other package. They are not in the container and will cause `ModuleNotFoundError`.
+**LAMMPS is NOT in stack_decision.** It is source-built and pre-installed in the environment — do NOT list it as a pip package. The installer will not pip-install it.
+
+**Do NOT add:** lammps, scipy, ase, mdanalysis, mpi4py, h5py, or any other package. They are not pip-installable in this venv.
 
 ---
 
@@ -98,14 +99,14 @@ Aim for 10–12 tasks. Each task describes a purpose and its critical constraint
 
 7. "Write a main() function that accepts two command-line arguments: a data directory and a work directory. Derive the input script path from the data directory — do not accept it as a separate argument. Chain the simulation, analysis, visualization, and time series steps in order, waiting for each to finish before starting the next. Clean up Parsl at the end."
 
-8. "Write a bash launcher script that resolves paths relative to the script file itself (never from the current working directory), accepts an optional Docker image tag, mounts the repo root into the container, and calls the workflow with the data and work directory arguments only."
+8. "Write a bash launcher script that resolves paths relative to the script file itself (never from the current working directory), and calls the workflow with the data and work directory arguments only."
 ```
 
 ---
 
 ## Key Rules
 
-- Do NOT add tasks for "install LAMMPS" or "build Docker image" — the sandbox is pre-built
+- Do NOT add tasks for "install LAMMPS" or "set up the venv" — the environment is pre-built by the installer
 - Do NOT add tasks involving MPI, mpirun, or any multi-node setup
 - If the paper uses a parameter not mentioned in the current in.watbox, note it in literature_findings but do NOT instruct codegen to hardcode it — the in.watbox file controls the simulation
 - The input script (`in.watbox`) is user-controlled; codegen must use it as-is
@@ -123,7 +124,7 @@ Aim for 10–12 tasks. Each task describes a purpose and its critical constraint
     "Ice structure detection via OVITO IdentifyDiamondModifier",
     "Cubic diamond (types 1-3) and hexagonal diamond (types 4-6) tracked per frame"
   ],
-  "stack_decision": ["lammps", "ovito", "parsl>=2024.0.0", "numpy", "matplotlib", "Pillow"],
+  "stack_decision": ["ovito", "parsl>=2024.0.0", "numpy", "matplotlib", "Pillow"],
   "tasks": [
     "Define @python_app run_lammps(...) ...",
     "Define @python_app analyze_with_ovito(...) ...",

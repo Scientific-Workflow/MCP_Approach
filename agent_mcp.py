@@ -1,10 +1,9 @@
 """
 MCP Approach -- Multi-Agent Workflow (Tool-Calling Mode)
 
-This is the MCP approach entry point, independent from Docker-MAW's artifact approach.
-Instead of generating a complete workflow script (codegen) and executing it (executor),
-this approach uses an explorer agent that interactively calls tools to execute each
-workflow task step by step inside a Docker container.
+This is the MCP approach entry point. Instead of generating a complete workflow script
+(codegen) and executing it (executor), this approach uses an explorer agent that
+interactively calls tools to execute each workflow task step by step in a local venv.
 
 Pipeline:
     orchestrator -> planner -> installer -> explorer -> end
@@ -106,7 +105,7 @@ Your agent skill file contains your full operating instructions. Follow them.
 
 Return ONLY a valid JSON object with exactly these keys:
 - literature_findings: list[str] -- specific, quantitative facts extracted from the paper
-- stack_decision:      list[str] -- packages available in the sandbox Dockerfile only
+- stack_decision:      list[str] -- packages to install into the local venv
 - tasks:               list[str] -- ordered, Python-API-level implementation steps
 - skill_requests:      list[str] -- skill paths to load (first call only; empty on subsequent calls)
 
@@ -132,13 +131,12 @@ If the input ends with "Orchestrator feedback", fix every issue raised before re
 # __ Project layout (injected into context) ____________________________________
 
 PROJECT_LAYOUT = """\
-Repo directory tree -- the repo root is always mounted at /app inside every container:
+Repo directory tree -- the repo root is mapped to /app/ at runtime:
 
 /app/                                  <- repo root
 +-- agent_mcp.py
 +-- mcp_tools.py
 +-- mcp_explorer.py
-+-- Dockerfile                         <- agent container image definition
 +-- requirements.txt
 +-- .env
 +-- data/
@@ -147,14 +145,13 @@ Repo directory tree -- the repo root is always mounted at /app inside every cont
 |   +-- AW.tersoff                     <- LAMMPS force field parameters
 +-- Literature/
 |   +-- *.pdf
-+-- builds/                            <- installer-generated Dockerfile
-|   +-- Dockerfile                     <- sandbox image definition
++-- builds/                            <- installer-generated requirements
+|   +-- requirements.txt               <- venv package list
 +-- work/                              <- explorer output goes here
     +-- run0/                          <- default working directory
 \
 """
 
-# Host-side repo path for Docker bind mounts.
 HOST_REPO_PATH = os.environ.get("HOST_REPO_PATH", os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -383,138 +380,72 @@ def planner(state: AgentState) -> dict:
 
 
 def installer(state: AgentState) -> dict:
+    import sys
     try:
-        build_dir       = os.path.join(os.path.dirname(os.path.abspath(__file__)), "builds")
+        build_dir         = os.path.join(os.path.dirname(os.path.abspath(__file__)), "builds")
         os.makedirs(build_dir, exist_ok=True)
-        dockerfile_path = os.path.join(build_dir, "Dockerfile")
-        image_tag       = "maw-sandbox:latest"
-
-        # __ Early exit: if the sandbox image already exists, skip installer __
-        _image_exists = subprocess.run(
-            ["docker", "inspect", image_tag], capture_output=True,
-        ).returncode == 0
-        if _image_exists:
-            console.print("[dim cyan][installer] sandbox image already exists -- skipping installer[/dim cyan]")
-            _existing = ""
-            if os.path.isfile(dockerfile_path):
-                with open(dockerfile_path) as _f:
-                    _existing = _f.read()
-            return {
-                "dockerfile":   _existing,
-                "image_tag":    image_tag,
-                "current_step": "installer_complete",
-            }
+        requirements_path = os.path.join(build_dir, "requirements.txt")
 
         if state.get("dockerfile_approved"):
-            # __ Phase 2: Dockerfile approved -- build the image __
-            import shutil, hashlib
-            docker_available = shutil.which("docker") is not None
+            # __ Phase 2: requirements approved -- pip install into the current venv __
+            with open(requirements_path) as f:
+                packages = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
 
-            if not docker_available:
-                console.print(
-                    "[yellow][installer] docker not found. "
-                    "Skipping image build -- Dockerfile written. "
-                    "Run 'docker build -t maw-sandbox:latest -f builds/Dockerfile .' to build.[/yellow]"
-                )
-                return {
-                    "image_tag":    image_tag,
-                    "current_step": "installer_complete",
-                }
+            if not packages:
+                console.print("[dim cyan][installer] no packages to install[/dim cyan]")
+                return {"image_tag": "", "current_step": "installer_complete"}
 
-            # __ skip rebuild if Dockerfile unchanged and image already exists __
-            hash_file = os.path.join(build_dir, ".dockerfile_hash")
-            with open(dockerfile_path) as f:
-                current_content = f.read()
-            current_hash = hashlib.md5(current_content.encode()).hexdigest()
-
-            image_exists = subprocess.run(
-                ["docker", "inspect", image_tag], capture_output=True,
-            ).returncode == 0
-
-            stored_hash = ""
-            if os.path.isfile(hash_file):
-                with open(hash_file) as f:
-                    stored_hash = f.read().strip()
-
-            if current_hash == stored_hash and image_exists:
-                console.print("[dim cyan][installer] Dockerfile unchanged and image exists -- skipping rebuild[/dim cyan]")
-                return {
-                    "image_tag":    image_tag,
-                    "current_step": "installer_complete",
-                }
-
-            console.print("[dim cyan][installer] Dockerfile approved -- building Docker image (this may take several minutes)...[/dim cyan]")
-
-            build_context = os.path.dirname(os.path.abspath(__file__))
+            console.print(f"[dim cyan][installer] pip installing {len(packages)} packages...[/dim cyan]")
             proc = subprocess.run(
-                ["docker", "build", "--network=host", "-t", image_tag, "-f", dockerfile_path, build_context],
-                capture_output=True, text=True,
-                timeout=1800,
+                [sys.executable, "-m", "pip", "install"] + packages,
+                capture_output=True, text=True, timeout=600,
             )
-
             if proc.returncode != 0:
-                raise RuntimeError(f"docker build failed (exit {proc.returncode}):\n{proc.stderr[-3000:]}")
+                console.print(f"[yellow][installer] pip stderr:\n{proc.stderr[-2000:]}[/yellow]")
+            else:
+                console.print("[dim cyan][installer] packages ready[/dim cyan]")
 
-            with open(hash_file, "w") as f:
-                f.write(current_hash)
-
-            console.print(f"[dim cyan][installer] image built: {image_tag}[/dim cyan]")
-            return {
-                "image_tag":    image_tag,
-                "current_step": "installer_complete",
-            }
+            return {"image_tag": "", "current_step": "installer_complete"}
 
         else:
-            # __ Phase 1: read or generate Dockerfile, send to orchestrator for approval __
-
-            if os.path.isfile(dockerfile_path):
-                # Use existing Dockerfile
-                console.print("\n[dim cyan][installer] reading existing Dockerfile from disk...[/dim cyan]")
-                with open(dockerfile_path) as _f:
-                    dockerfile = _f.read()
+            # __ Phase 1: read or generate requirements.txt, send to orchestrator for approval __
+            if os.path.isfile(requirements_path):
+                console.print("[dim cyan][installer] reading existing requirements.txt...[/dim cyan]")
+                with open(requirements_path) as f:
+                    content = f.read()
             else:
-                # Auto-generate Dockerfile from planner's stack_decision
-                console.print("\n[dim cyan][installer] no Dockerfile found -- generating from stack_decision...[/dim cyan]")
+                console.print("[dim cyan][installer] generating requirements.txt from stack_decision...[/dim cyan]")
                 stack = state.get("stack_decision", [])
-                pip_packages = [pkg for pkg in stack if pkg]
+                content = "\n".join(pkg for pkg in stack if pkg) + "\n"
+                with open(requirements_path, "w") as f:
+                    f.write(content)
+                console.print(f"[dim cyan][installer] generated requirements.txt with {len(stack)} packages[/dim cyan]")
 
-                dockerfile_lines = [
-                    "FROM ubuntu:24.04",
-                    "ENV DEBIAN_FRONTEND=noninteractive",
-                    "",
-                    "# System dependencies",
-                    "RUN apt-get update && apt-get install -y \\",
-                    "    python3 python3-pip python3-dev build-essential \\",
-                    "    wget git \\",
-                    "    && rm -rf /var/lib/apt/lists/*",
-                    "",
-                    "# Python packages from planner stack_decision",
-                ]
-                for pkg in pip_packages:
-                    dockerfile_lines.append(
-                        f"RUN pip3 install {pkg} --break-system-packages"
-                    )
-                dockerfile_lines.extend([
-                    "",
-                    "WORKDIR /app",
-                ])
-                dockerfile = "\n".join(dockerfile_lines) + "\n"
-
-                # Write generated Dockerfile to disk
-                with open(dockerfile_path, "w") as f:
-                    f.write(dockerfile)
-                console.print(f"[dim cyan][installer] generated Dockerfile with {len(pip_packages)} packages[/dim cyan]")
+            # Apply orchestrator rejection feedback: strip any packages explicitly flagged for removal.
+            import re as _re
+            feedback = state.get("orchestrator_feedback", "")
+            if feedback:
+                to_remove = {p.lower() for p in _re.findall(r"[Rr]emove\s+'([^']+)'", feedback)}
+                if to_remove:
+                    filtered = [
+                        ln for ln in content.splitlines()
+                        if ln.strip() and ln.strip().split(">=")[0].split("==")[0].lower() not in to_remove
+                    ]
+                    content = "\n".join(filtered) + "\n"
+                    with open(requirements_path, "w") as f:
+                        f.write(content)
+                    console.print(f"[dim cyan][installer] removed {to_remove} per orchestrator feedback[/dim cyan]")
 
             console.print(Panel(
-                dockerfile,
-                title="[bold yellow]Dockerfile -- Pending Orchestrator Approval[/bold yellow]",
+                content,
+                title="[bold yellow]requirements.txt -- Pending Orchestrator Approval[/bold yellow]",
                 border_style="yellow",
             ))
-            console.print("[dim yellow][installer] Dockerfile written -- waiting for orchestrator approval before building image...[/dim yellow]")
+            console.print("[dim yellow][installer] waiting for orchestrator approval...[/dim yellow]")
 
             return {
-                "dockerfile":   dockerfile,
-                "current_step": "installer_dockerfile_pending_approval",
+                "dockerfile":   content,
+                "current_step": "installer_requirements_pending_approval",
             }
 
     except Exception as e:

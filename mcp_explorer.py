@@ -76,7 +76,7 @@ def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
 def submit_task(name: str, python_code: str, depends_on: list[str] | None = None, timeout: int = 1800) -> str:
     """Submit a Python task for execution via the workflow engine.
 
-    The task runs inside the sandbox container. Write complete, self-contained
+    The task runs in the local venv environment. Write complete, self-contained
     Python code with all imports at the top.
 
     Args:
@@ -93,14 +93,14 @@ def submit_task(name: str, python_code: str, depends_on: list[str] | None = None
 
 @tool
 def submit_shell_task(name: str, command: str, work_dir: str = "/app/work/run0", timeout: int = 1800) -> str:
-    """Submit a shell command for execution in the sandbox container.
+    """Submit a shell command for execution in the local environment.
 
     Use this for file operations, system commands, and non-Python tasks.
 
     Args:
         name: Descriptive name (e.g. "copy_data_files", "create_directories")
         command: Shell command to execute (e.g. "mkdir -p /app/work/run0/frames")
-        work_dir: Working directory inside the container (default: /app/work/run0)
+        work_dir: Working directory (default: /app/work/run0)
         timeout: Max seconds to wait (default: 600)
     """
     return _call_mcp_tool("submit_shell_task", {
@@ -136,7 +136,7 @@ def list_tasks() -> str:
 
 @tool
 def install_package(package: str) -> str:
-    """Install a pip package into the sandbox container.
+    """Install a pip package into the local venv.
 
     Use when a required package is missing (ModuleNotFoundError).
 
@@ -148,7 +148,7 @@ def install_package(package: str) -> str:
 
 @tool
 def check_package(package: str) -> str:
-    """Check if a Python package is installed in the sandbox container.
+    """Check if a Python package is installed in the local venv.
 
     Args:
         package: Package name to check (e.g. "numpy", "lammps", "ovito")
@@ -158,24 +158,24 @@ def check_package(package: str) -> str:
 
 @tool
 def list_files(directory: str = "/app/work/run0") -> str:
-    """List all files in a directory inside the sandbox container.
+    """List all files in a directory in the local environment.
 
     Use this to verify that expected output files were created after a task.
 
     Args:
-        directory: Path inside the container to list (default: /app/work/run0)
+        directory: Path to list (default: /app/work/run0)
     """
     return _call_mcp_tool("list_files", {"directory": directory})
 
 
 @tool
 def read_file(path: str, max_lines: int = 100) -> str:
-    """Read the contents of a file inside the sandbox container.
+    """Read the contents of a file in the local environment.
 
     Use this to inspect output files, check results, or debug errors.
 
     Args:
-        path: Absolute path of the file inside the container
+        path: Absolute path of the file
         max_lines: Maximum number of lines to return (default: 100)
     """
     return _call_mcp_tool("read_file", {"path": path, "max_lines": max_lines})
@@ -214,7 +214,7 @@ MCP server.
 You receive:
 - A list of tasks from the planner (what needs to be done)
 - Literature findings (scientific context from the paper)
-- Information about what software is installed in the container
+- Information about what software is installed in the venv
 
 Your goal: complete every task successfully by calling tools, observing results, and
 adapting your approach when things fail.
@@ -363,7 +363,7 @@ async def _explorer_async(state: dict, engine: str) -> dict:
             context_parts.append("Literature findings:\n" +
                                  "\n".join(f"  - {f}" for f in findings))
         if stack_decision:
-            context_parts.append(f"Software stack in container: {', '.join(stack_decision)}")
+            context_parts.append(f"Software stack in venv: {', '.join(stack_decision)}")
         if tasks:
             context_parts.append("Tasks to execute:\n" +
                                  "\n".join(f"  {i+1}. {t}" for i, t in enumerate(tasks)))
@@ -423,12 +423,23 @@ async def _explorer_async(state: dict, engine: str) -> dict:
         # ReAct loop
         # LLM calls are sync (blocking), tool calls go through MCP async session.
         # We run LLM in a thread to avoid blocking the event loop.
-        max_iterations = 30
+        max_iterations = 40
         exploration_log = []
         iteration = 0
 
+        _MAX_TOOL_RESULT_CHARS = 8_000  # cap per tool result added to messages
+        _CONTEXT_WINDOW        = 20     # message slots kept beyond system + human
+
         for iteration in range(max_iterations):
             console.print(f"\n[dim yellow][explorer] iteration {iteration + 1}/{max_iterations}[/dim yellow]")
+
+            # Trim context window: keep system + human + last _CONTEXT_WINDOW messages.
+            # Scan forward past any leading ToolMessages to avoid orphaned tool results.
+            if len(messages) > 2 + _CONTEXT_WINDOW:
+                tail = messages[-_CONTEXT_WINDOW:]
+                start = next((i for i, m in enumerate(tail) if not isinstance(m, ToolMessage)), 0)
+                messages = messages[:2] + tail[start:]
+                console.print(f"[dim yellow][explorer] context trimmed to {len(messages)} messages[/dim yellow]")
 
             # Run LLM call in a thread (it's sync/blocking)
             response = await asyncio.to_thread(llm_with_tools.invoke, messages)
@@ -539,7 +550,10 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                 color = "green" if tool_succeeded else "red"
                 console.print(f"[{color}][explorer] {tool_name} -> {display_status}[/{color}]")
 
-                messages.append(ToolMessage(content=tool_result, tool_call_id=tool_id))
+                messages.append(ToolMessage(
+                    content=tool_result[:_MAX_TOOL_RESULT_CHARS],
+                    tool_call_id=tool_id,
+                ))
 
                 # If MCP connection is broken, stop the tool loop
                 if mcp_broken:
