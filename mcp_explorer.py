@@ -271,10 +271,20 @@ adapting your approach when things fail.
 - You CAN measure and plot actual single-machine timing of your own pipeline stages
   (e.g. how long particle generation, analysis, and visualization took on this run)
 
-## Data Layout Inside the Container
+## Data Layout (MANDATORY -- do not deviate)
 
 - Input data: /app/data/ (source files)
-- Working directory: /app/work/run0/ (output goes here)
+- Working directory: /app/work/run0/ (ALL output goes here)
+- ALL output files, subdirectories, scripts, and results MUST be placed under /app/work/run0/
+- Use consistent subdirectory names:
+  - /app/work/run0/frames/       for simulation trajectory/frame output
+  - /app/work/run0/renders/      for visualization images and GIFs
+  - /app/work/run0/results.csv   for tabular analysis results
+  - /app/work/run0/workflow.py   for generated workflow scripts
+  - /app/work/run0/run_workflow.sh for launcher scripts
+- Do NOT create output directories with arbitrary names (no "output/", "decaf_workflow_output/", 
+  "smoketest/", etc.)
+- Do NOT write files to /tmp/ -- always use /app/work/run0/
 """
 
 
