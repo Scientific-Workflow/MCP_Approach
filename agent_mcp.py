@@ -491,7 +491,7 @@ if __name__ == "__main__":
     parser.add_argument("--paper", type=str, help="Path to the PDF paper or paper index (1-based)")
     parser.add_argument("--goal", type=str, help="Goal for the workflow")
     parser.add_argument("--engine", type=str, default="parsl",
-                        choices=["parsl"],  # add "pycompss", "adios" as they're implemented
+                        choices=["parsl", "pycompss"],
                         help="Workflow engine to use (default: parsl)")
     args = parser.parse_args()
 

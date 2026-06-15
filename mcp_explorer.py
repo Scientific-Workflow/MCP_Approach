@@ -34,6 +34,7 @@ _SERVERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "servers
 
 ENGINE_SERVERS = {
     "parsl": os.path.join(_SERVERS_DIR, "parsl_server.py"),
+    "pycompss": os.path.join(_SERVERS_DIR, "pycompss_server.py"),
 }
 
 
