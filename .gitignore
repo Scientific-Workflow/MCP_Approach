@@ -3,5 +3,6 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
-work/
 runs/
+venv3/
+wheelhouse/

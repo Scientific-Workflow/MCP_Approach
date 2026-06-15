@@ -55,6 +55,7 @@ class AgentState(TypedDict):
     stack_decision:        list[str]
     tasks:                 list[str]
     exploration_log:       list[dict]       # explorer output (tool call records)
+    selected_data_files:   list[str]        # filenames chosen from data/ at startup
     dockerfile:            str
     dockerfile_approved:   bool
     image_tag:             str
@@ -320,15 +321,19 @@ def orchestrator(state: AgentState) -> dict:
 
 def planner(state: AgentState) -> dict:
     try:
-        console.print("\n[dim cyan][planner] reading PDF...[/dim cyan]")
-
-        reader = PdfReader(state["pdf_path"])
-        pdf_text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
-        console.print(f"[dim cyan][planner] loaded {len(reader.pages)} pages[/dim cyan]")
-
         feedback = state.get("orchestrator_feedback", "")
         feedback_section = (f"\n\nOrchestrator feedback -- address these issues before returning:\n{feedback}"
                             if feedback else "")
+
+        if state.get("pdf_path"):
+            console.print("\n[dim cyan][planner] reading PDF...[/dim cyan]")
+            reader = PdfReader(state["pdf_path"])
+            pdf_text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
+            console.print(f"[dim cyan][planner] loaded {len(reader.pages)} pages[/dim cyan]")
+            paper_section = f"\n\nPaper:\n{pdf_text}"
+        else:
+            console.print("\n[dim cyan][planner] no PDF -- planning from goal only[/dim cyan]")
+            paper_section = ""
 
         # Build system prompt: base skill + available skill index + core prompt
         _base = _read_skill("agents/planner")
@@ -338,7 +343,10 @@ def planner(state: AgentState) -> dict:
                   f"\n  use_cases: {_uc}  -- request as \"use_cases/<name>/planner\""
                   f"\n  systems:   {_sys}  -- request as \"systems/<name>\"") if (_uc or _sys) else ""
         _sys_prompt = (_base + _index + "\n\n---\n\n" + PLANNER_PROMPT) if _base else PLANNER_PROMPT
-        _human = f"Goal: {state['goal']}\n\nPaper:\n{pdf_text}{feedback_section}"
+        _data_files = state.get("selected_data_files", [])
+        _data_section = (f"\n\nAvailable input data files (in /app/data/):\n" +
+                         "\n".join(f"  - {f}" for f in _data_files)) if _data_files else ""
+        _human = f"Goal: {state['goal']}{_data_section}{paper_section}{feedback_section}"
 
         result: PlannerOutput = _invoke_structured(model, PlannerOutput, [
             SystemMessage(content=_sys_prompt),
@@ -489,6 +497,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="MAW -- Multi-Agent Workflow (MCP Approach)")
     parser.add_argument("--paper", type=str, help="Path to the PDF paper or paper index (1-based)")
+    parser.add_argument("--skip-paper", action="store_true", help="Skip paper selection and plan from goal text only")
     parser.add_argument("--goal", type=str, help="Goal for the workflow")
     parser.add_argument("--engine", type=str, default="parsl",
                         choices=["parsl", "pycompss"],
@@ -500,34 +509,73 @@ if __name__ == "__main__":
     lit_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Literature")
     os.makedirs(lit_dir, exist_ok=True)
 
-    pdfs = [f for f in os.listdir(lit_dir) if f.lower().endswith(".pdf")]
-    if not pdfs:
-        console.print("[red]No PDFs found in the Literature/ folder. Add a paper and try again.[/red]")
-        raise SystemExit(1)
-
-    console.print("\n[bold]Available papers:[/bold]")
-    for i, name in enumerate(pdfs, 1):
-        console.print(f"  {i}. {name}")
-
-    # Handle paper selection
-    if args.paper:
-        choice = args.paper
-        try:
-            pdf_path = os.path.join(lit_dir, pdfs[int(choice) - 1])
-        except (ValueError, IndexError):
-            pdf_path = os.path.join(lit_dir, choice)
-            if not os.path.isfile(pdf_path):
-                console.print(f"[red]Paper not found: {choice}[/red]")
-                raise SystemExit(1)
+    if args.skip_paper:
+        pdf_path = ""
+        console.print("[dim]Paper selection skipped -- planner will use goal text only.[/dim]")
     else:
-        choice = input("\nSelect a paper by number: ").strip()
-        try:
-            pdf_path = os.path.join(lit_dir, pdfs[int(choice) - 1])
-        except (ValueError, IndexError):
-            console.print("[red]Invalid selection.[/red]")
-            raise SystemExit(1)
+        pdfs = [f for f in os.listdir(lit_dir) if f.lower().endswith(".pdf")]
 
-    console.print(f"[dim]Selected: {os.path.basename(pdf_path)}[/dim]")
+        if not pdfs:
+            console.print("[yellow]No PDFs found in Literature/. Proceeding without a paper (goal-only mode).[/yellow]")
+            pdf_path = ""
+        else:
+            console.print("\n[bold]Available papers:[/bold]")
+            for i, name in enumerate(pdfs, 1):
+                console.print(f"  {i}. {name}")
+            console.print(f"  0. Skip -- use goal text only")
+
+            if args.paper:
+                choice = args.paper
+                try:
+                    pdf_path = os.path.join(lit_dir, pdfs[int(choice) - 1])
+                except (ValueError, IndexError):
+                    pdf_path = os.path.join(lit_dir, choice)
+                    if not os.path.isfile(pdf_path):
+                        console.print(f"[red]Paper not found: {choice}[/red]")
+                        raise SystemExit(1)
+            else:
+                choice = input("\nSelect a paper by number (or 0 to skip): ").strip()
+                if choice == "0":
+                    pdf_path = ""
+                    console.print("[dim]Paper selection skipped -- planner will use goal text only.[/dim]")
+                else:
+                    try:
+                        pdf_path = os.path.join(lit_dir, pdfs[int(choice) - 1])
+                    except (ValueError, IndexError):
+                        console.print("[red]Invalid selection.[/red]")
+                        raise SystemExit(1)
+
+        if pdf_path:
+            console.print(f"[dim]Selected: {os.path.basename(pdf_path)}[/dim]")
+
+    # Handle data file selection
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    all_data_files = sorted(f for f in os.listdir(data_dir) if os.path.isfile(os.path.join(data_dir, f))) if os.path.isdir(data_dir) else []
+
+    if not all_data_files:
+        console.print("[yellow]No files found in data/ -- agents will have no input data.[/yellow]")
+        selected_data_files = []
+    else:
+        console.print("\n[bold]Available data files:[/bold]")
+        for i, name in enumerate(all_data_files, 1):
+            console.print(f"  {i}. {name}")
+        raw = input("\nSelect files by number (comma-separated, or Enter for all): ").strip()
+        if not raw:
+            selected_data_files = all_data_files
+            console.print("[dim]Using all data files.[/dim]")
+        else:
+            selected_data_files = []
+            for token in raw.split(","):
+                token = token.strip()
+                try:
+                    selected_data_files.append(all_data_files[int(token) - 1])
+                except (ValueError, IndexError):
+                    console.print(f"[yellow]Skipping invalid selection: {token!r}[/yellow]")
+            if not selected_data_files:
+                console.print("[yellow]No valid files selected -- using all.[/yellow]")
+                selected_data_files = all_data_files
+            else:
+                console.print(f"[dim]Selected: {', '.join(selected_data_files)}[/dim]")
 
     # Handle goal
     if args.goal:
@@ -552,6 +600,7 @@ if __name__ == "__main__":
         "stack_decision":        [],
         "tasks":                 [],
         "exploration_log":       [],
+        "selected_data_files":   selected_data_files,
         "dockerfile":            "",
         "dockerfile_approved":   False,
         "image_tag":             "",

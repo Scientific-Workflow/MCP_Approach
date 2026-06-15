@@ -359,7 +359,12 @@ async def _explorer_async(state: dict, engine: str) -> dict:
         findings = state.get("literature_findings", [])
         stack_decision = state.get("stack_decision", [])
 
+        data_files = state.get("selected_data_files", [])
+
         context_parts = []
+        if data_files:
+            context_parts.append("Available input data files (in /app/data/):\n" +
+                                 "\n".join(f"  - {f}" for f in data_files))
         if findings:
             context_parts.append("Literature findings:\n" +
                                  "\n".join(f"  - {f}" for f in findings))
@@ -424,7 +429,7 @@ async def _explorer_async(state: dict, engine: str) -> dict:
         # ReAct loop
         # LLM calls are sync (blocking), tool calls go through MCP async session.
         # We run LLM in a thread to avoid blocking the event loop.
-        max_iterations = 40
+        max_iterations = 100
         exploration_log = []
         iteration = 0
 
