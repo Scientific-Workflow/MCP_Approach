@@ -510,7 +510,13 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                     exit_code = parsed.get("exit_code")
                     has_error = "error" in parsed
 
-                    if status_val in ("completed", "success"):
+                    if status_val == "failed":
+                        tool_succeeded = False
+                        display_status = f"failed (exit {exit_code})"
+                    elif has_error:
+                        tool_succeeded = False
+                        display_status = f"error: {parsed['error'][:80]}"
+                    elif status_val in ("completed", "success"):
                         tool_succeeded = True
                         display_status = status_val
                     elif exit_code == 0:
@@ -534,12 +540,15 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                     elif "tasks" in parsed:
                         tool_succeeded = True
                         display_status = f"{parsed.get('total', '?')} tasks"
-                    elif has_error:
-                        tool_succeeded = False
-                        display_status = f"error: {parsed['error'][:80]}"
+                    elif "nnodes" in parsed:
+                        # get_resources response — no status field, presence of nnodes = success
+                        tool_succeeded = True
+                        launcher = parsed.get("launcher") or "none"
+                        display_status = f"nodes={parsed['nnodes']} ranks={parsed.get('ntasks',1)} launcher={launcher}"
                     else:
-                        tool_succeeded = True  # no error key = probably fine
-                        display_status = "ok"
+                        # Unknown response shape — treat as failure so errors are never silently swallowed
+                        tool_succeeded = False
+                        display_status = "unknown response"
                 except (json.JSONDecodeError, AttributeError):
                     tool_succeeded = True  # raw text response, not an error
                     display_status = "done"

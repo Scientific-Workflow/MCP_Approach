@@ -19,7 +19,7 @@ approach in real time.
 
 | Tool | Purpose | When to use |
 |---|---|---|
-| `get_resources` | Query available compute resources (nodes, ranks, launcher) | **First call in HPC env** — before writing any MPI command |
+| `get_resources` | Query available compute resources (nodes, ranks, launcher) | **First call in HPC env** — before writing any MPI command. Check `warning` field in the response. |
 | `submit_task` | Execute Python code via workflow engine | Scientific computation (LAMMPS, OVITO), data processing, plotting |
 | `submit_shell_task` | Run shell commands | File operations (cp, mkdir, ls), non-MPI system commands |
 | `submit_mpi_task` | Run a command under MPI (mpirun -np N) | MPI-capable executables: LAMMPS binary, mpi4py scripts |
@@ -49,9 +49,20 @@ This tells the workflow engine: "don't run OVITO until LAMMPS is done."
 
 ## Execution Strategy
 
+### Phase 0: PBS Allocation Check (HPC env only — do this BEFORE anything else)
+
+If your environment knowledge is `knowledge/lcrc` (HPC mode):
+1. Call `get_resources` — this is your **very first tool call**, before any check_package or list_files
+2. Read the `in_pbs` field in the response
+3. If `in_pbs` is `false` — **STOP. Do not proceed.** Report:
+   > "Not inside a PBS allocation. Start an interactive job first:
+   > `qsub -I -l nodes=N:ppn=M -l walltime=HH:MM:SS -A <project>`
+   > then re-run the agent from the compute node shell."
+4. If `in_pbs` is `true` — note the `ntasks` and `launcher` values, then continue to Phase 1
+
 ### Phase 1: Environment Verification
 
-Before executing any workflow task:
+After the PBS check (or immediately, for local env):
 1. Check that required packages are installed (`check_package`)
 2. Verify input data files exist (`list_files` on /app/data/)
 3. Create the working directory if needed (`submit_shell_task` with mkdir)
@@ -100,6 +111,18 @@ When writing Python code for `submit_task`:
 - Handle errors gracefully with try/except and informative error messages
 
 ---
+
+## PBS Allocation Guard (HPC only)
+
+When running with `--env hpc`, `get_resources` must be your first tool call.
+Check the `warning` field in the response:
+
+- If `in_pbs` is `false` — **STOP immediately.** Do not attempt to run LAMMPS,
+  submit_mpi_task, or any compute task. Report to the user:
+  > "Not inside a PBS allocation. Start an interactive PBS job first:
+  > `qsub -I -l nodes=N:ppn=M -l walltime=HH:MM:SS -A <project>`
+  > then re-run the agent from the compute node shell."
+- If `in_pbs` is `true` — proceed normally using the reported `ntasks` and `launcher`.
 
 ## Key Constraints
 

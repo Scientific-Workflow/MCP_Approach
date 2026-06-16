@@ -2,7 +2,7 @@
 name: agents/planner
 description: >
   Complete behavioral spec for the planner agent. Covers role, runtime constraints,
-  extraction strategy, task granularity rules, and how to write implementation-level tasks.
+  extraction strategy, task granularity rules, and how to write MCP-style execution tasks.
   This IS the planner's operating manual — the system prompt in code is just the JSON schema.
 ---
 
@@ -39,54 +39,62 @@ Only include packages that are actually needed for the workflow. Never invent pa
 Include MPI-related packages (`mpi4py`, etc.) only when the environment knowledge
 confirms MPI is available and appropriate.
 
-### `tasks` — granular, Python-API-level implementation steps
+### `tasks` — MCP execution steps for the explorer
+
+---
+
+## What Tasks Are in the MCP Approach
+
+**Critical:** Tasks describe what the **explorer agent executes via MCP tool calls** — not code to write to a file and run. There is no workflow.py, no main(), no bash launcher, no @python_app definitions. The explorer calls `submit_task` with inline Python code directly.
+
+Each task is one discrete step the explorer will execute. The explorer reads the task and calls either:
+- `submit_task` — to run inline Python code (simulation, analysis, plotting)
+- `submit_shell_task` — to run shell commands (mkdir, cp, ls)
+- `check_package` — to verify a package is installed
+- `submit_mpi_task` — to run MPI-parallel executables (HPC env only)
 
 ---
 
 ## Task Granularity Rules — READ CAREFULLY
 
-**Aim for 15–20 tasks, never fewer than 12.** Vague high-level tasks like "implement the LAMMPS simulation" are useless. Every task must be specific enough that a programmer could write the exact code from it alone.
+**Aim for 10–15 tasks.** Every task must be specific enough that the explorer can write the exact code for it without guessing. Vague tasks produce wrong code.
 
-### One task per distinct implementation requirement
+### One task per distinct execution step
 
-Break each @python_app into multiple tasks:
-- **One task** to define the function signature and its purpose
-- **One task per critical internal requirement** (file copies, directory setup, API call order, return value)
-- Codegen will miss requirements if they are bundled into a single task
-
-### What counts as its own task
-- Any function definition (@python_app or main)
+Each of these is its own task:
 - Any "CRITICAL: must happen before X" ordering requirement
-- Any specific API call that is non-obvious (e.g. `ovito.io.import_file` vs `Pipeline()`)
-- Any data transformation with a specific rule (e.g. counting type ranges)
+- Any specific API call that is non-obvious (e.g. `ovito.io.import_file` not `Pipeline()`)
+- Any data transformation with a specific rule (e.g. counting structure type ranges)
 - Any output file with a specific format or naming convention
-- The bash launcher script is a separate task
+- Any verification step (check that output files exist before proceeding)
 
-### Example: 4 tasks for a single @python_app
+### Example: 4 tasks for a simulation step
+
 Instead of:
-> "Define run_lammps that copies files, runs LAMMPS, returns frames path"
+> "Run LAMMPS and analyze the output"
 
 Write:
-1. "Define @python_app `run_lammps(input_script, data_dir, work_dir)`: create `work_dir` with `os.makedirs(work_dir, exist_ok=True)`, copy supporting data files from `data_dir` into `work_dir` using `shutil.copy2`"
-2. "In `run_lammps`: copy the input script fresh into `work_dir` using `shutil.copy2` every time — never skip this, the user may have edited it"
-3. "In `run_lammps`: call `os.chdir(work_dir)` BEFORE initializing the simulation tool — dump/output paths in the input script are relative to CWD"
-4. "In `run_lammps`: create `frames/` subdirectory inside `work_dir`, initialize the simulation, run it, close it, return `os.path.join(work_dir, 'frames')`"
+1. "Copy force field, data, and input script files to /app/work/run0/ using submit_shell_task. Always re-copy the input script fresh — never skip."
+2. "Run LAMMPS via submit_task: call os.chdir('/app/work/run0') BEFORE creating the lammps instance — dump paths in the input script are relative to CWD. Use Python API: from lammps import lammps; lmp = lammps(cmdargs=['-screen','none']); lmp.file('in.watbox'); lmp.close()"
+3. "Verify output: use list_files to confirm trajectory files exist in /app/work/run0/frames/ before proceeding to analysis."
+4. "Run OVITO analysis via submit_task: load trajectory with ovito.io.import_file, apply IdentifyDiamondModifier, write results.csv"
 
 ---
 
 ## Task Structure for a Complete Workflow
 
-A complete task list must cover ALL of these areas:
+A complete task list must cover ALL of these phases:
 
-| Area | Min tasks |
+| Phase | Min tasks |
 |---|---|
-| Parsl configuration and loading | 1 |
-| Primary simulation @python_app (setup, file copies, run, return) | 4–5 |
-| Analysis @python_app (file loading, algorithm, output format) | 3–4 |
-| Visualization @python_app (per-type colors, atom size, GIF) | 3–4 |
-| Time series plot @python_app (read CSV, plot, save) | 2 |
-| main() (argparse, chain, parsl.clear) | 2–3 |
-| run_workflow.sh bash launcher | 1 |
+| Package verification (check_package for each required tool) | 1–2 |
+| Directory and file setup (mkdir, copy data files) | 1–2 |
+| Primary simulation (submit_task with inline Python — critical ordering requirements each get their own task) | 2–3 |
+| Simulation output verification (list_files to confirm output exists) | 1 |
+| Analysis (submit_task with inline Python) | 2–3 |
+| Visualization / per-frame rendering (submit_task) | 1–2 |
+| Animation assembly | 1 |
+| Time series or summary plot | 1–2 |
 
 ---
 
@@ -107,11 +115,10 @@ If the input ends with "Orchestrator feedback", fix every issue. Do not repeat t
 ## Output Quality Checklist
 
 Before finalizing:
-- [ ] 15+ tasks, not 4
-- [ ] Every @python_app has 3–5 tasks, not 1
+- [ ] 10+ tasks, not 3
+- [ ] No task says "write a @python_app", "write a main()", or "write a bash launcher" — those are artifact approach patterns, not MCP
 - [ ] Every critical ordering requirement (chdir before lammps, copy before run) is its own task
 - [ ] Specific API names used (not "run the simulation" but "call `lmp.file()`")
 - [ ] Visualization colors, atom sizes, and output formats are specified per task
-- [ ] main() argparse interface is explicitly specified
-- [ ] run_workflow.sh is a separate task
+- [ ] A verification step (list_files) exists after the simulation before analysis
 - [ ] Stack and tasks match the environment constraints from the loaded knowledge skill

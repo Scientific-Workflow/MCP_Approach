@@ -30,7 +30,20 @@ _exit_stack: Optional[AsyncExitStack] = None
 _server_process = None
 
 # Path to the server script
-_SERVERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "servers")
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+_SERVERS_DIR = os.path.join(_PROJECT_ROOT, "servers")
+
+# Python interpreter used to launch the MCP server.
+# Prefer VENV_PYTHON env var, then venv3 relative to this file, then sys.executable.
+def _resolve_server_python() -> str:
+    if os.environ.get("VENV_PYTHON"):
+        return os.environ["VENV_PYTHON"]
+    candidate = os.path.join(_PROJECT_ROOT, "venv3", "bin", "python3")
+    if os.path.isfile(candidate):
+        return candidate
+    return sys.executable
+
+_SERVER_PYTHON = _resolve_server_python()
 
 # Available engine servers
 ENGINE_SERVERS = {
@@ -58,7 +71,7 @@ async def connect_to_server(engine: str = "parsl") -> ClientSession:
         raise FileNotFoundError(f"Server script not found: {server_path}")
 
     server_params = StdioServerParameters(
-        command=sys.executable,
+        command=_SERVER_PYTHON,
         args=[server_path],
         env={
             **os.environ,

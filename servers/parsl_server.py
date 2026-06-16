@@ -53,12 +53,28 @@ DEFAULT_WORK_DIR = os.path.join(REPO_ROOT, "work", "run0")
 # Default data directory
 DEFAULT_DATA_DIR = os.path.join(REPO_ROOT, "data")
 
+# MPI library paths required for LAMMPS Python API on Swing/Improv (Intel oneAPI MPI)
+_MPI_LIB_PATHS = (
+    "/gpfs/fs1/soft/swing/manual/intel/oneapi/2021.2.0.2883/mpi/2021.2.0/lib/release:"
+    "/gpfs/fs1/soft/improv/software/custom-built/intel-oneapi-toolkit/mpi/2021.15/lib:"
+    "/gpfs/fs1/soft/improv/software/custom-built/intel-oneapi-toolkit/mpi/2021.15/opt/mpi/libfabric/lib"
+)
+_existing_ld = os.environ.get("LD_LIBRARY_PATH", "")
+_ld_library_path = _MPI_LIB_PATHS + (":" + _existing_ld if _existing_ld else "")
+
 # Environment variables passed to every task execution
 TASK_ENV = {
     **os.environ,
     "LIBGL_ALWAYS_SOFTWARE": "1",
     "PYOPENGL_PLATFORM": "osmesa",
     "OVITO_GUI_MODE": "0",
+    "LD_LIBRARY_PATH": _ld_library_path,
+    # Allow Intel MPI to initialize in a subprocess not launched via mpirun.
+    # Without these, MPI_Init sends SIGTERM (exit 143) when called outside mpirun.
+    "PMI_SIZE": "1",
+    "PMI_RANK": "0",
+    "I_MPI_HYDRA_BOOTSTRAP": "fork",
+    "FI_PROVIDER": "tcp",
 }
 
 # __ Resource Detection ________________________________________________________
@@ -91,6 +107,15 @@ def _detect_resources() -> dict:
         else:
             launcher = ""
 
+    warning = ""
+    if not in_pbs:
+        warning = (
+            "NOT inside a PBS job (PBS_JOBID not set). "
+            "MPI tasks and multi-node execution are unavailable. "
+            "If running on HPC, start an interactive PBS job before launching the agent: "
+            "qsub -I -l nodes=N:ppn=M -l walltime=HH:MM:SS -A <project>"
+        )
+
     return {
         "in_pbs":        in_pbs,
         "nnodes":        nnodes,
@@ -98,6 +123,7 @@ def _detect_resources() -> dict:
         "cpus_per_task": cpus_per,
         "nodelist":      nodelist,
         "launcher":      launcher,
+        "warning":       warning,
     }
 
 # __ Task Registry _____________________________________________________________
@@ -203,6 +229,9 @@ def submit_task(
         "submitted_at": time.time(),
     }
 
+    # Resolve /app/ path aliases in user code so os.chdir("/app/work/run0") etc. work
+    resolved_code = _resolve_paths(python_code)
+
     # Wrap user code
     wrapped_script = f"""\
 import sys, os, traceback
@@ -213,7 +242,7 @@ os.chdir("{DEFAULT_WORK_DIR}")
 
 try:
     # --- User task code ---
-{_indent(python_code, 4)}
+{_indent(resolved_code, 4)}
     # --- End user code ---
     print("__TASK_SUCCESS__")
 except Exception as e:

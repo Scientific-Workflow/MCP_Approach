@@ -30,15 +30,17 @@ matplotlib
 Pillow
 ```
 
-**LAMMPS:** Must be built from source on Linux — it is NOT pip-installable for this use case. Build with MPI support when running in an HPC environment; build serial when running locally. See build notes below.
+**LAMMPS:** Must be built from source on Linux/local — it is NOT pip-installable for this use case. On HPC clusters (LCRC/Swing), LAMMPS is pre-installed on the cluster; install only the Python bindings into the venv. See build notes below.
 
 **Do NOT add:** scipy, ase, mdanalysis, h5py, or any other package not listed above. Add `mpi4py` only when the environment knowledge confirms MPI is available.
 
 ---
 
-## LAMMPS Source Build (Linux/WSL)
+## LAMMPS — Local Build (Linux/WSL)
 
-LAMMPS must be compiled with `BUILD_MPI=off` to avoid MPI initialization errors in Parsl workers. The pip `lammps` wheel calls `MPI_Init` on import even in serial mode, causing `WorkerLost` / `ORTE_ERROR_LOG` crashes.
+Build from source with `BUILD_MPI=off`. The pip `lammps` wheel (and builds that link
+`libmpi.so`) call `MPI_Init` on import in serial contexts, causing Parsl `WorkerLost`
+crashes. Serial build avoids this entirely.
 
 ### System dependencies (apt)
 ```
@@ -50,7 +52,7 @@ libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1
 libxrender1 libxi6 libxtst6
 ```
 
-### cmake flags
+### cmake flags (local/serial)
 ```
 -DBUILD_MPI=off -DBUILD_OMP=off -DBUILD_SHARED_LIBS=on
 -DLAMMPS_EXCEPTIONS=on -DPKG_MANYBODY=on -DPKG_MOLECULE=on
@@ -58,19 +60,38 @@ libxrender1 libxi6 libxtst6
 ```
 Install to `/usr/local` via `make install`, then set `LD_LIBRARY_PATH=/usr/local/lib`.
 
-### LAMMPS Python bindings
+### LAMMPS Python bindings (local)
 After the shared library is installed, install the Python bindings from the source tarball:
 ```bash
 cd lammps-<version>/python && pip install .
 ```
 
-### Environment variables (set before running)
+### Environment variables (local)
 ```
 LIBGL_ALWAYS_SOFTWARE=1
 PYOPENGL_PLATFORM=osmesa
 OVITO_GUI_MODE=0
 LD_LIBRARY_PATH=/usr/local/lib
 ```
+
+---
+
+## LAMMPS — HPC Build (LCRC/Swing)
+
+On LCRC, LAMMPS is pre-built on the cluster with MPI support. Do NOT build from source —
+install only the Python bindings into the venv from the cluster's existing binary.
+
+```bash
+# Find the cluster LAMMPS python bindings and install into venv
+cd /path/to/lammps-source/python && pip install .
+```
+
+The pre-built binary links `libmpi.so.12` (Intel oneAPI MPI). These paths are needed at
+runtime for `from lammps import lammps` to succeed. They are handled automatically by:
+- `setup_hpc.sh` — sets `LD_LIBRARY_PATH` for the agent process
+- `TASK_ENV` in `servers/parsl_server.py` — propagates paths to every task subprocess
+
+Run `source setup_hpc.sh` before starting the agent on HPC. No manual `module load` needed.
 
 ---
 

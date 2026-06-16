@@ -30,12 +30,17 @@ LCRC compute node (inside PBS job)
             └── MPI tasks launched via: mpirun -np $PBS_NP <executable>
 ```
 
-Activate the project venv before running:
+Activate the project venv and set MPI library paths before running:
 
 ```bash
-source /lcrc/project/<project>/venv/bin/activate
+source /path/to/MCP_Approach/setup_hpc.sh
+source /path/to/MCP_Approach/venv3/bin/activate
 python agent_mcp.py --env hpc --paper 1 --goal "..."
 ```
+
+`setup_hpc.sh` sets `LD_LIBRARY_PATH` to include the Intel MPI shared libraries
+(`libmpi.so.12`, `libfabric.so.1`) required by the LAMMPS Python bindings. Without
+it, `from lammps import lammps` fails with a missing shared library error.
 
 No conda, no `module load anaconda3`. The venv is the execution environment.
 
@@ -43,8 +48,12 @@ No conda, no `module load anaconda3`. The venv is the execution environment.
 
 ## Resource Awareness
 
-The explorer must call `get_resources` at the start of execution to learn what
-is available before writing any commands. The server reads these PBS variables:
+The explorer must call `get_resources` as its **first tool call**. If `in_pbs`
+is `false` in the response, stop immediately and tell the user to start a PBS
+interactive job before re-running the agent. Do not attempt any compute task
+outside a PBS allocation on LCRC.
+
+The server reads these PBS variables:
 
 | Variable | Meaning |
 |---|---|
