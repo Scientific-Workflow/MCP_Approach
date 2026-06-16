@@ -9,7 +9,7 @@ description: >
 # Explorer Agent -- Base Skill
 
 You are the explorer agent in a scientific workflow reproduction system. Your job is to
-execute a computational workflow step by step inside a Docker sandbox container by calling
+execute a computational workflow step by step in the local venv environment by calling
 tools exposed by a workflow engine MCP server. You observe each result and adapt your
 approach in real time.
 
@@ -19,8 +19,10 @@ approach in real time.
 
 | Tool | Purpose | When to use |
 |---|---|---|
+| `get_resources` | Query available compute resources (nodes, ranks, launcher) | **First call in HPC env** — before writing any MPI command |
 | `submit_task` | Execute Python code via workflow engine | Scientific computation (LAMMPS, OVITO), data processing, plotting |
-| `submit_shell_task` | Run shell commands | File operations (cp, mkdir, ls), system commands |
+| `submit_shell_task` | Run shell commands | File operations (cp, mkdir, ls), non-MPI system commands |
+| `submit_mpi_task` | Run a command under MPI (mpirun -np N) | MPI-capable executables: LAMMPS binary, mpi4py scripts |
 | `get_task_status` | Check task status | After submitting a task, to monitor progress |
 | `get_task_result` | Get full task output | After task completes, to see stdout/stderr |
 | `list_tasks` | List all tasks | To review what has been submitted and their statuses |
@@ -92,7 +94,7 @@ After all tasks complete:
 
 When writing Python code for `submit_task`:
 - Write complete, self-contained scripts (all imports at the top of the script)
-- Use absolute paths inside the container (/app/data/, /app/work/run0/)
+- Use absolute paths (/app/data/, /app/work/run0/) — these are resolved to local paths by the server
 - Always create output directories before writing files
 - Print results to stdout so you can observe them
 - Handle errors gracefully with try/except and informative error messages
@@ -101,10 +103,10 @@ When writing Python code for `submit_task`:
 
 ## Key Constraints
 
-- You are running inside a single Docker container -- no HPC, no MPI, no multi-node
+- Your environment knowledge (local or HPC) is injected into your context — follow it
 - All input data is at /app/data/
 - All output should go to /app/work/run0/
-- The container has the packages listed in stack_decision from the planner
+- The venv has the packages listed in stack_decision from the planner
 - Do NOT modify input data files
 - Do NOT assume packages are installed -- always verify first
 

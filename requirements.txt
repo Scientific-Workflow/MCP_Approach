@@ -1,6 +1,6 @@
-# Agent dependencies -- runs inside the agent container (python:3.11-slim)
+# Agent dependencies -- run in the local venv
 # DO NOT add lammps, ovito, parsl, or numpy here.
-# Those are sandbox dependencies and belong in builds/Dockerfile only.
+# Those are workflow dependencies and belong in builds/requirements.txt only.
 langgraph>=0.2.0
 langchain>=0.3.0
 langchain-openai>=0.2.0

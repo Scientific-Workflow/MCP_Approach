@@ -24,7 +24,7 @@ Pair with the use-case installer skill for domain-specific package requirements.
 
 The installer is a two-phase agent:
 - **Phase 1:** Returns a requirements.txt to the orchestrator for review. Sets `current_step="installer_requirements_pending_approval"`.
-- **Phase 2:** Runs `pip install -r requirements.txt` only after the orchestrator sets `dockerfile_approved=True`. Skips install if all packages are already present in the venv.
+- **Phase 2:** Runs `pip install -r requirements.txt` only after the orchestrator sets `requirements_approved=True`. Skips install if all packages are already present in the venv.
 
 ---
 
@@ -36,12 +36,12 @@ Reads `builds/requirements.txt` from disk if it exists, otherwise generates one 
 
 Returns:
 ```python
-{"dockerfile": requirements_content, "current_step": "installer_requirements_pending_approval"}
+{"requirements": requirements_content, "current_step": "installer_requirements_pending_approval"}
 ```
 
 ### Step 2: Orchestrator reviews and approves
 
-The orchestrator checks the requirements and sets `dockerfile_approved=True`. Installer is called again.
+The orchestrator checks the requirements and sets `requirements_approved=True`. Installer is called again.
 
 ### Step 3 (Phase 2): Install packages (or skip)
 
@@ -56,7 +56,7 @@ If any missing → run `pip install -r builds/requirements.txt`.
 
 ## Key Rules and Constraints
 
-- Never proceed to Phase 2 without `dockerfile_approved=True` in state
+- Never proceed to Phase 2 without `requirements_approved=True` in state
 - Always check for existing packages before installing — avoids unnecessary network calls
 - `image_tag` field is unused in venv mode; set to `""` or omit
 

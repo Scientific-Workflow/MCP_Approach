@@ -262,7 +262,7 @@ adapting your approach when things fail.
 - Do NOT generate synthetic, fake, or hardcoded data to simulate results from the paper
 - Do NOT fabricate timing data, performance benchmarks, or scaling measurements
 - Do NOT reproduce scaling plots, strong/weak scaling curves, or performance comparisons
-  that require HPC infrastructure (MPI, multi-node, SLURM) you do not have
+  that require HPC infrastructure (MPI, multi-node, PBS) unavailable in the current environment
 - ALL visualizations MUST use data produced by your own simulation runs in this session,
   not values copied from the paper or invented to look plausible
 - If a task requires infrastructure you do not have (MPI, multi-node cluster, specific
@@ -573,7 +573,7 @@ async def _explorer_async(state: dict, engine: str) -> dict:
         else:
             console.print("[bold red][explorer] hit max iterations limit[/bold red]")
 
-        # Cleanup MCP server container
+        # Cleanup MCP server
         console.print("[dim cyan][explorer] cleaning up MCP server...[/dim cyan]")
         try:
             await session.call_tool("cleanup", {})

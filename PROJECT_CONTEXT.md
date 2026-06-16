@@ -9,7 +9,7 @@ You are a senior code and development assistant. Your job is to aid in developme
 ## Project Vision
 
 This is the **MCP (Model Context Protocol) approach** to the MAW agentic framework. It is a
-parallel, independent implementation alongside the original Docker-MAW (artifact approach).
+parallel, independent implementation alongside the original artifact approach.
 
 Both approaches share the same goal: automate end-to-end reproduction of scientific workflows
 described in published research papers. The key difference:
@@ -17,7 +17,7 @@ described in published research papers. The key difference:
 **The workflow engine (Parsl, PyCOMPSs, etc.) is exposed as an MCP server that the agent
 calls interactively, rather than generating standalone workflow scripts.**
 
-| | Artifact Approach (Docker-MAW) | MCP Approach (this repo) |
+| | Artifact Approach | MCP Approach (this repo) |
 |---|---|---|
 | Code generation | codegen generates complete workflow.py | No script generation |
 | Execution | executor runs workflow.py all at once | explorer calls MCP server tools step by step |
@@ -40,10 +40,10 @@ Workflow Engine Layer (MCP Server)
   servers/pycompss_server.py -- (future) PyCOMPSs MCP Server
   servers/adios_server.py    -- (future) ADIOS MCP Server
                                             |
-                                            | docker exec
+                                            | subprocess (venv)
                                             v
-Execution Layer (Docker Container)
-  Long-running sandbox container with scientific software
+Execution Layer (Local Python Venv)
+  Scientific packages installed in the local venv
   LAMMPS, OVITO, Parsl, numpy, matplotlib, etc.
 ```
 
@@ -59,8 +59,6 @@ MCP_Approach/
 +-- servers/
 |   +-- __init__.py
 |   +-- parsl_server.py           <- Parsl Workflow MCP Server
-+-- Dockerfile                    <- Agent container (python:3.11-slim + docker CLI)
-+-- docker-compose.yml            <- Docker Compose config
 +-- requirements.txt              <- Agent dependencies (includes mcp SDK)
 +-- .env                          <- API keys and model config (Argo endpoint)
 +-- PROJECT_CONTEXT.md            <- This file
@@ -72,7 +70,7 @@ MCP_Approach/
 |   +-- YildizO_RAPIDS.pdf        <- Primary paper
 |   +-- cise-article-YILDIZ.pdf   <- Secondary paper
 +-- builds/
-|   +-- Dockerfile                <- Sandbox image definition
+|   +-- requirements.txt          <- Workflow venv package list
 +-- work/                         <- Workflow runtime output
 +-- runs/                         <- Run logs (JSONL)
 +-- skills/
@@ -101,7 +99,7 @@ MCP_Approach/
 
 ```
 orchestrator --> planner    --> orchestrator
-             --> installer  (phase 1: read Dockerfile | phase 2: docker build)
+             --> installer  (phase 1: read requirements.txt | phase 2: pip install)
              --> explorer   (connects to MCP server, ReAct loop with tool calls)
              --> END
 ```
@@ -113,15 +111,15 @@ orchestrator --> planner    --> orchestrator
 | Tool | Description |
 |---|---|
 | submit_task | Submit Python code for execution via Parsl with dependency tracking |
-| submit_shell_task | Run shell commands in the sandbox container |
+| submit_shell_task | Run shell commands via the workflow engine |
 | get_task_status | Check task status (pending/running/completed/failed) |
 | get_task_result | Get full stdout/stderr from a completed task |
 | list_tasks | List all submitted tasks and their statuses |
-| install_package | pip install a package into the running container |
+| install_package | pip install a package into the local venv |
 | check_package | Verify a package is installed |
 | list_files | List files in a directory |
 | read_file | Read file contents |
-| cleanup | Stop and remove the sandbox container |
+| cleanup | Stop and clean up the MCP server process |
 
 ---
 
@@ -146,15 +144,6 @@ python agent_mcp.py --paper 1 --goal "Reproduce this workflow using LAMMPS and O
 
 # Specify engine explicitly
 python agent_mcp.py --engine parsl --paper 1 --goal "..."
-
-# Via Docker
-docker build -t maw-agent .
-docker run --rm -it \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v $(pwd):/app \
-  -e HOST_REPO_PATH=$(pwd) \
-  --env-file .env \
-  maw-agent python agent_mcp.py --paper 1 --goal "..."
 ```
 
 ---
@@ -165,9 +154,7 @@ docker run --rm -it \
    started by the explorer. Communication is via stdio (JSON-RPC). This cleanly separates
    the agent logic from the engine logic.
 
-2. **Long-running container**: Unlike the old approach (docker run --rm per command), the
-   MCP server maintains a single long-running sandbox container. Packages installed persist
-   for the session. This is more efficient and allows Parsl to manage state.
+2. **Persistent venv**: The MCP server runs as a single long-lived subprocess. Packages installed via `install_package` persist for the session, and the local venv persists across runs. This is more efficient and allows Parsl to manage state.
 
 3. **skill_updater disabled**: During development, auto-updating skill files is turned off
    to avoid contaminating knowledge with incomplete-code errors.
@@ -183,5 +170,5 @@ docker run --rm -it \
 - Agent framework: LangGraph (StateGraph with conditional edges)
 - MCP SDK: mcp >= 1.0.0 (Anthropic's Model Context Protocol)
 - LLM backend: Argonne Argo API (OpenAI-compatible endpoint)
-- Sandbox: Docker container built from builds/Dockerfile
+- Sandbox: Local Python venv (packages listed in builds/requirements.txt)
 - Console output: rich (Panel, color-coded per agent)

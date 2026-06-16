@@ -8,7 +8,7 @@ description: >
 
 # Parsl — System Skill
 
-Parsl orchestrates workflow steps as asynchronous Python functions. In MAW, it manages the LAMMPS simulation and OVITO analysis as parallel tasks on a single local node inside Docker.
+Parsl orchestrates workflow steps as asynchronous Python functions. In MAW, it manages the LAMMPS simulation and OVITO analysis as parallel tasks on a single local node.
 
 ---
 

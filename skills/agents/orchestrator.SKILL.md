@@ -28,10 +28,9 @@ This is the MCP (tool-calling) approach: instead of generating a complete workfl
 
 ## Runtime Environment
 
-The workflow runs in a **local Python venv on a single machine** -- NOT an HPC cluster.
-- No MPI network fabric, no SLURM, no multi-node communication, no shared filesystem across nodes
-- Always reason in terms of single-node, single-process execution
-- Do NOT recommend mpirun, OpenMPI, MPICH, mpi4py, SLURM, PBS, or HPC job schedulers
+Your environment knowledge is injected into your context alongside this skill.
+Follow whatever `knowledge/local` or `knowledge/lcrc` says about what is allowed.
+Do not assume single-node constraints unless the local knowledge skill is loaded.
 
 ---
 
@@ -50,7 +49,7 @@ Follow this flow unless you have a specific reason to deviate.
 ### After planner -- route BACK if:
 - Tasks are vague (no specific function names, no parameters)
 - Simulation parameters are missing (temperature, timestep, run length, force field)
-- Tasks include HPC-specific steps (SLURM submission, MPI setup)
+- Tasks contradict the loaded environment knowledge (e.g. MPI steps when local, or no resource query when HPC)
 
 ### After installer -- route to explorer:
 - Once packages are installed, always route to explorer
@@ -84,13 +83,13 @@ The installer works in two phases requiring your explicit sign-off:
 
 **Phase 1:** Installer generates `requirements.txt` and stops. `current_step` will be `"installer_requirements_pending_approval"`.
 
-**Phase 2:** Installer runs `pip install`. Only runs after you set `dockerfile_approved=true`.
+**Phase 2:** Installer runs `pip install`. Only runs after you set `requirements_approved=true`.
 
 When `current_step == "installer_requirements_pending_approval"`:
-- **APPROVE:** `dockerfile_approved=true`, `next="installer"`, `feedback=""`
-- **REJECT:** `dockerfile_approved=false`, `next="installer"`, `feedback="<specific issues>"`
+- **APPROVE:** `requirements_approved=true`, `next="installer"`, `feedback=""`
+- **REJECT:** `requirements_approved=false`, `next="installer"`, `feedback="<specific issues>"`
 
-In all other situations: `dockerfile_approved=false`.
+In all other situations: `requirements_approved=false`.
 
 ---
 
@@ -103,7 +102,7 @@ In all other situations: `dockerfile_approved=false`.
 | `literature_findings` | planner | Key findings from paper |
 | `stack_decision` | planner | Required packages |
 | `tasks` | planner | Ordered implementation steps |
-| `dockerfile` | installer phase 1 | requirements.txt content -- review before approving |
+| `requirements` | installer phase 1 | requirements.txt content -- review before approving |
 | `exploration_log` | explorer | Tool call records (accumulated list of dicts) |
 | `planner_revisions` | orchestrator | How many times planner was retried |
 | `installer_revisions` | orchestrator | How many times installer was retried |

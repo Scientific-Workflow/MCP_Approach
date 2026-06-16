@@ -6,8 +6,7 @@ The explorer agent connects to this server via MCP protocol to submit tasks,
 check status, get results, and manage the workflow execution.
 
 This server executes tasks locally (or in a virtual environment) using subprocess.
-No Docker required. This makes it compatible with HPC environments and local
-development without containerization overhead.
+Compatible with HPC environments and local development.
 
 The VENV_PYTHON environment variable controls which Python interpreter to use.
 If set, tasks run in that virtualenv. If not, tasks run with the system Python.
@@ -61,6 +60,45 @@ TASK_ENV = {
     "PYOPENGL_PLATFORM": "osmesa",
     "OVITO_GUI_MODE": "0",
 }
+
+# __ Resource Detection ________________________________________________________
+
+def _detect_resources() -> dict:
+    """Read available compute resources from PBS env vars or local fallback."""
+    import shutil
+
+    in_pbs = bool(os.environ.get("PBS_JOBID"))
+
+    nnodes   = int(os.environ.get("PBS_NUM_NODES", 1))
+    ntasks   = int(os.environ.get("PBS_NP",        1))
+    cpus_per = int(os.environ.get("PBS_NUM_PPN",   1))
+
+    # PBS_NODEFILE is a path to a file listing allocated hosts (one per slot).
+    # Read it if present to get the node list.
+    nodefile = os.environ.get("PBS_NODEFILE", "")
+    nodelist = ""
+    if nodefile and os.path.isfile(nodefile):
+        with open(nodefile) as _nf:
+            nodelist = ",".join(sorted(set(_nf.read().split())))
+
+    # Launcher: honour explicit override, then mpirun (PBS standard), else empty.
+    launcher = os.environ.get("MPI_LAUNCHER", "")
+    if not launcher:
+        if shutil.which("mpirun"):
+            launcher = "mpirun"
+        elif shutil.which("mpiexec"):
+            launcher = "mpiexec"
+        else:
+            launcher = ""
+
+    return {
+        "in_pbs":        in_pbs,
+        "nnodes":        nnodes,
+        "ntasks":        ntasks,
+        "cpus_per_task": cpus_per,
+        "nodelist":      nodelist,
+        "launcher":      launcher,
+    }
 
 # __ Task Registry _____________________________________________________________
 
@@ -429,6 +467,92 @@ def read_file(path: str, max_lines: int = 100) -> str:
 
 
 @mcp.tool()
+def get_resources() -> str:
+    """Return available compute resources detected from the environment.
+
+    On a PBS cluster this reads PBS_NUM_NODES, PBS_NP, PBS_NUM_PPN, and
+    PBS_NODEFILE. On a local machine all counts fall back to 1. Always call
+    this before writing any MPI command so you know how many ranks are available.
+
+    Returns:
+        JSON with in_pbs, nnodes, ntasks, cpus_per_task, nodelist, launcher
+    """
+    return json.dumps(_detect_resources(), indent=2)
+
+
+@mcp.tool()
+def submit_mpi_task(
+    name: str,
+    command: str,
+    num_ranks: int = 0,
+    work_dir: str = "",
+    timeout: int = 1800,
+) -> str:
+    """Submit a command to run in parallel under MPI (srun or mpirun).
+
+    Prepends the detected MPI launcher to the given command. Use this for
+    MPI-capable executables such as LAMMPS (`lmp`), or parallel Python
+    scripts using mpi4py.
+
+    Args:
+        name:      Descriptive name for this task
+        command:   The executable and its arguments (without the launcher prefix),
+                   e.g. "lmp -in /app/work/run0/in.watbox"
+        num_ranks: Number of MPI ranks. 0 (default) uses all available ranks
+                   from PBS_NP, or 1 on a local machine.
+        work_dir:  Working directory (default: repo work/run0)
+        timeout:   Max seconds to wait (default: 1800)
+
+    Returns:
+        JSON with task_id, status, exit_code, stdout, stderr
+    """
+    task_id = f"task_{uuid.uuid4().hex[:8]}"
+    _work = work_dir if work_dir else DEFAULT_WORK_DIR
+
+    resources = _detect_resources()
+    ranks = num_ranks if num_ranks > 0 else resources["ntasks"]
+    launcher = resources["launcher"]
+
+    if launcher == "srun":
+        full_cmd = f"srun -n {ranks} {command}"
+    elif launcher == "mpirun":
+        full_cmd = f"mpirun -np {ranks} {command}"
+    else:
+        # No MPI launcher found -- run the command directly (single process)
+        full_cmd = command
+
+    _tasks[task_id] = {
+        "name": name,
+        "status": "running",
+        "depends_on": [],
+        "submitted_at": time.time(),
+        "mpi_ranks":  ranks,
+        "launcher":   launcher,
+    }
+
+    resolved_cmd = _resolve_paths(full_cmd)
+    result = _run_command(["bash", "-c", resolved_cmd], work_dir=_work, timeout=timeout)
+
+    _tasks[task_id]["status"] = "completed" if result["exit_code"] == 0 else "failed"
+    _tasks[task_id]["exit_code"] = result["exit_code"]
+    _tasks[task_id]["stdout"] = result["stdout"]
+    _tasks[task_id]["stderr"] = result["stderr"]
+    _tasks[task_id]["completed_at"] = time.time()
+
+    return json.dumps({
+        "task_id":   task_id,
+        "name":      name,
+        "status":    _tasks[task_id]["status"],
+        "launcher":  launcher,
+        "ranks":     ranks,
+        "command":   full_cmd,
+        "exit_code": result["exit_code"],
+        "stdout":    result["stdout"][:3000],
+        "stderr":    result["stderr"][:3000],
+    }, indent=2)
+
+
+@mcp.tool()
 def cleanup() -> str:
     """Clean up resources. For local execution, this just clears the task registry."""
     global _tasks
@@ -446,10 +570,10 @@ def _indent(text: str, spaces: int) -> str:
 
 
 def _resolve_paths(text: str) -> str:
-    """Replace /app/ container paths with actual local repo paths.
+    """Replace /app/ path aliases with actual local repo paths.
 
     The explorer and skill files use /app/data/, /app/work/run0/ etc.
-    which are container conventions. This resolves them to local paths.
+    as path aliases. This resolves them to local paths.
     """
     return text.replace("/app/", REPO_ROOT + "/").replace("//", "/")
 

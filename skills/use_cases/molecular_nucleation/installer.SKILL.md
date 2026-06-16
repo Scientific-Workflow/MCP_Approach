@@ -14,8 +14,8 @@ Sets up the local venv with all packages needed for the LAMMPS water crystalliza
 
 ## Current Installer Behavior
 
-1. **Phase 1:** Read or generate `builds/requirements.txt`. Return it as `dockerfile`. Do NOT call an LLM to generate a new one if the file already exists.
-2. **Orchestrator:** Always approves immediately (sets `dockerfile_approved=True`).
+1. **Phase 1:** Read or generate `builds/requirements.txt`. Return it as `requirements`. Do NOT call an LLM to generate a new one if the file already exists.
+2. **Orchestrator:** Always approves immediately (sets `requirements_approved=True`).
 3. **Phase 2:** Check if all packages are already installed. If yes, skip pip install and return. If no, run `pip install -r builds/requirements.txt`.
 
 ---
@@ -30,9 +30,9 @@ matplotlib
 Pillow
 ```
 
-**LAMMPS:** Must be built from source (serial, no MPI) on Linux/WSL — it is NOT pip-installable for this use case. See build notes below.
+**LAMMPS:** Must be built from source on Linux — it is NOT pip-installable for this use case. Build with MPI support when running in an HPC environment; build serial when running locally. See build notes below.
 
-**Do NOT add:** scipy, ase, mdanalysis, mpi4py, h5py, or any other package not listed above.
+**Do NOT add:** scipy, ase, mdanalysis, h5py, or any other package not listed above. Add `mpi4py` only when the environment knowledge confirms MPI is available.
 
 ---
 

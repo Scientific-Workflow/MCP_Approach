@@ -150,7 +150,7 @@ async def submit_shell_task(
     work_dir: str = "/app/work/run0",
     timeout: int = 600,
 ) -> str:
-    """Submit a shell command for execution in the sandbox container."""
+    """Submit a shell command for execution via the workflow engine."""
     return await call_tool("submit_shell_task", {
         "name": name,
         "command": command,
@@ -175,20 +175,42 @@ async def list_tasks() -> str:
 
 
 async def install_package(package: str) -> str:
-    """Install a pip package into the sandbox container."""
+    """Install a pip package into the local venv."""
     return await call_tool("install_package", {"package": package})
 
 
 async def check_package(package: str) -> str:
-    """Check if a Python package is installed in the sandbox container."""
+    """Check if a Python package is installed in the local venv."""
     return await call_tool("check_package", {"package": package})
 
 
 async def list_files(directory: str = "/app/work/run0") -> str:
-    """List files in a directory inside the sandbox container."""
+    """List files in a directory in the working tree."""
     return await call_tool("list_files", {"directory": directory})
 
 
 async def read_file(path: str, max_lines: int = 100) -> str:
-    """Read the contents of a file inside the sandbox container."""
+    """Read the contents of a file in the working tree."""
     return await call_tool("read_file", {"path": path, "max_lines": max_lines})
+
+
+async def get_resources() -> str:
+    """Return available compute resources (PBS vars or local fallback)."""
+    return await call_tool("get_resources", {})
+
+
+async def submit_mpi_task(
+    name: str,
+    command: str,
+    num_ranks: int = 0,
+    work_dir: str = "/app/work/run0",
+    timeout: int = 1800,
+) -> str:
+    """Submit a command to run under MPI (mpirun). Prepends the launcher automatically."""
+    return await call_tool("submit_mpi_task", {
+        "name":      name,
+        "command":   command,
+        "num_ranks": num_ranks,
+        "work_dir":  work_dir,
+        "timeout":   timeout,
+    })

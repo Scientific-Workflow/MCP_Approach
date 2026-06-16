@@ -85,7 +85,7 @@ Aim for 10–12 tasks. Each task describes a purpose and its critical constraint
 ---
 
 ```
-1. "Set up a single-node Parsl workflow executor — local machine only, no HPC, no MPI. Load the config before defining any apps."
+1. "Set up a Parsl workflow executor appropriate for the environment (see environment knowledge). Load the config before defining any apps."
 
 2. "Write a Parsl app to run the LAMMPS simulation. It should copy the force field and data files into the working directory, then copy the input script fresh every run (never skip — the user may have updated it). Change the working directory into the run folder BEFORE starting LAMMPS, because the dump paths in the script are relative to CWD. Run LAMMPS using its Python API (not subprocess), do not modify the input script in any way. Return the path to where trajectory frames were written."
 
