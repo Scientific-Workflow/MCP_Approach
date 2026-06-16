@@ -21,6 +21,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from rich.console import Console
+from trace_logger import tracer
 from rich.panel import Panel
 
 from mcp import ClientSession, StdioServerParameters
@@ -303,6 +304,12 @@ def explorer(state: dict) -> dict:
     global _mcp_session, _event_loop
 
     console.print("\n[dim cyan][explorer] starting interactive workflow execution...[/dim cyan]")
+    tracer.log_agent_start("explorer", {"engine": state.get("engine", "parsl")})
+    tracer.log_agent_input("explorer", {
+        "tasks_count": len(state.get("tasks", [])),
+        "findings_count": len(state.get("literature_findings", [])),
+        "engine": state.get("engine", "parsl"),
+    })
 
     engine = state.get("engine", "parsl")
     console.print(f"[dim cyan][explorer] connecting to {engine} MCP server...[/dim cyan]")
@@ -565,6 +572,10 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                 color = "green" if tool_succeeded else "red"
                 console.print(f"[{color}][explorer] {tool_name} -> {display_status}[/{color}]")
 
+                # Log to trace
+                tracer.log_tool_call("explorer", tool_name, tool_args,
+                                     tool_result[:300], tool_succeeded)
+
                 messages.append(ToolMessage(
                     content=tool_result[:_MAX_TOOL_RESULT_CHARS],
                     tool_call_id=tool_id,
@@ -602,6 +613,14 @@ async def _explorer_async(state: dict, engine: str) -> dict:
             f"{iteration + 1} iterations"
         )
         console.print(f"[dim cyan][explorer] {summary}[/dim cyan]")
+
+        tracer.log_agent_output("explorer", {
+            "total_tool_calls": total_calls,
+            "successes": successes,
+            "failures": failures,
+            "iterations": iteration + 1,
+        })
+        tracer.log_agent_end("explorer")
 
         return {
             "exploration_log": exploration_log,

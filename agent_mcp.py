@@ -33,6 +33,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
 from mcp_explorer import explorer
+from trace_logger import tracer
 
 load_dotenv()
 
@@ -219,6 +220,14 @@ def _list_skills(folder: str) -> list:
 
 def orchestrator(state: AgentState) -> dict:
     console.print("\n[dim cyan][orchestrator] reviewing state...[/dim cyan]")
+    tracer.log_agent_start("orchestrator")
+    tracer.log_agent_input("orchestrator", {
+        "current_step": state.get("current_step", ""),
+        "goal": state.get("goal", ""),
+        "has_findings": bool(state.get("literature_findings")),
+        "has_tasks": bool(state.get("tasks")),
+        "has_exploration_log": bool(state.get("exploration_log")),
+    })
 
     revisions = {
         "planner":   state.get("planner_revisions",   0),
@@ -323,6 +332,10 @@ def orchestrator(state: AgentState) -> dict:
         revision_update[key] = state.get(key, 0) + 1
         console.print(f"[bold yellow][orchestrator] revision #{revision_update[key]} for {result.next}[/bold yellow]")
 
+    tracer.log_routing("orchestrator", result.next, result.reasoning, result.feedback)
+    tracer.log_agent_output("orchestrator", {"next": result.next, "feedback": result.feedback})
+    tracer.log_agent_end("orchestrator")
+
     return {
         "next":                  result.next,
         "orchestrator_feedback": result.feedback,
@@ -334,12 +347,15 @@ def orchestrator(state: AgentState) -> dict:
 
 def planner(state: AgentState) -> dict:
     try:
+        console.print("\n[dim cyan][planner] reading PDF...[/dim cyan]")
+        tracer.log_agent_start("planner")
+        tracer.log_agent_input("planner", {"pdf_path": state["pdf_path"], "goal": state["goal"]})
+
         feedback = state.get("orchestrator_feedback", "")
         feedback_section = (f"\n\nOrchestrator feedback -- address these issues before returning:\n{feedback}"
                             if feedback else "")
 
         if state.get("pdf_path"):
-            console.print("\n[dim cyan][planner] reading PDF...[/dim cyan]")
             reader = PdfReader(state["pdf_path"])
             pdf_text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
             console.print(f"[dim cyan][planner] loaded {len(reader.pages)} pages[/dim cyan]")
@@ -391,6 +407,14 @@ def planner(state: AgentState) -> dict:
             border_style="green",
         ))
 
+        tracer.log_agent_output("planner", {
+            "findings_count": len(result.literature_findings),
+            "stack": result.stack_decision,
+            "tasks_count": len(result.tasks),
+            "tasks_preview": result.tasks[:3],
+        })
+        tracer.log_agent_end("planner")
+
         return {
             "literature_findings": result.literature_findings,
             "stack_decision":      result.stack_decision,
@@ -405,6 +429,7 @@ def planner(state: AgentState) -> dict:
 def installer(state: AgentState) -> dict:
     import sys
     try:
+        tracer.log_agent_start("installer")
         build_dir         = os.path.join(os.path.dirname(os.path.abspath(__file__)), "builds")
         os.makedirs(build_dir, exist_ok=True)
         requirements_path = os.path.join(build_dir, "requirements.txt")
@@ -416,6 +441,8 @@ def installer(state: AgentState) -> dict:
 
             if not packages:
                 console.print("[dim cyan][installer] no packages to install[/dim cyan]")
+                tracer.log_agent_output("installer", {"status": "no packages"})
+                tracer.log_agent_end("installer")
                 return {"image_tag": "", "current_step": "installer_complete"}
 
             console.print(f"[dim cyan][installer] pip installing {len(packages)} packages...[/dim cyan]")
@@ -428,6 +455,8 @@ def installer(state: AgentState) -> dict:
             else:
                 console.print("[dim cyan][installer] packages ready[/dim cyan]")
 
+            tracer.log_agent_output("installer", {"status": "packages installed", "count": len(packages)})
+            tracer.log_agent_end("installer")
             return {"image_tag": "", "current_step": "installer_complete"}
 
         else:
@@ -466,6 +495,8 @@ def installer(state: AgentState) -> dict:
             ))
             console.print("[dim yellow][installer] waiting for orchestrator approval...[/dim yellow]")
 
+            tracer.log_agent_output("installer", {"status": "pending approval", "packages": content.strip()})
+            tracer.log_agent_end("installer")
             return {
                 "requirements": content,
                 "current_step": "installer_requirements_pending_approval",
@@ -632,4 +663,18 @@ if __name__ == "__main__":
         "env":                   args.env,
     }
 
+    tracer.reset()
     app.invoke(initial_state)
+
+    # Save trace
+    trace_path = os.path.join(runs_dir, datetime.now().strftime("%Y%m%d_%H%M%S") + "_trace.json")
+    tracer.save(trace_path)
+    console.print(f"[dim]Trace saved: {trace_path}[/dim]")
+
+    # Print interaction summary
+    summary = tracer.get_summary()
+    console.print(f"\n[bold]Trace Summary:[/bold]")
+    console.print(f"  Agents: {', '.join(summary['agents_involved'])}")
+    console.print(f"  Routing path: {' -> '.join(summary['routing_path'])}")
+    console.print(f"  Tool calls: {summary['tool_calls']} ({summary['tool_successes']} succeeded)")
+    console.print(f"  Total time: {summary['total_duration_s']}s")
