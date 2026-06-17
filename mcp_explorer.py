@@ -21,7 +21,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from rich.console import Console
-from trace_logger import tracer
+from trace_logger import tracer, extract_usage
 from rich.panel import Panel
 
 from mcp import ClientSession, StdioServerParameters
@@ -457,6 +457,12 @@ async def _explorer_async(state: dict, engine: str) -> dict:
             # Run LLM call in a thread (it's sync/blocking)
             response = await asyncio.to_thread(llm_with_tools.invoke, messages)
             messages.append(response)
+
+            usage = extract_usage(response)
+            if usage:
+                tracer.log_token_usage("explorer", usage["input_tokens"],
+                                       usage["output_tokens"], usage["total_tokens"],
+                                       model=getattr(llm, "model_name", ""))
 
             if not response.tool_calls:
                 console.print(Panel(
