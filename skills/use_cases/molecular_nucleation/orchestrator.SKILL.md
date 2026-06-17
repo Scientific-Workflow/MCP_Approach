@@ -33,8 +33,8 @@ When the explorer reports tool call failures, use these patterns to decide where
 
 | Error pattern | Route to | Feedback |
 |---|---|---|
-| `unrecognized arguments` | explorer | "workflow.py uses wrong argparse interface. Must accept only --data-dir and --work-dir. Remove any other arguments." |
-| `WorkerLost` + `MPI` / `ORTE` | explorer | "LAMMPS MPI init failure in Parsl worker. Do not use pip lammps wheel — use `from lammps import lammps` from the source-built install. Ensure LD_LIBRARY_PATH=/usr/local/lib is set before import." |
+| `exit 143` on run_lammps | explorer | "MPI init failure — run_lammps should handle this automatically via server TASK_ENV. Check that get_resources was called first and in_pbs is true." |
+| `WorkerLost` + `MPI` / `ORTE` | explorer | "LAMMPS MPI init failure. The run_lammps tool handles HPC/local selection — do not use submit_task with Python API for LAMMPS." |
 | `ModuleNotFoundError: No module named 'lammps'` | explorer | "LAMMPS not found. Use `from lammps import lammps` — the source build is at /usr/local/lib. Do not pip install lammps." |
 | `ModuleNotFoundError: No module named 'PIL'` | explorer | "Pillow is installed as 'Pillow' not 'PIL'. Import with `from PIL import Image`." |
 | `frames/step.*.lammpstrj` not found / no frames | explorer | "LAMMPS did not produce dump files. Ensure os.chdir(work_dir) is called BEFORE lammps() and that work_dir/frames/ exists." |
@@ -56,8 +56,18 @@ When the installer presents requirements.txt for approval, verify it contains:
 
 ---
 
+## Routing Examples
+
+**LAMMPS succeeded, OVITO failed:** explorer_complete, frames exist but results.csv missing -> `next="explorer"`, `feedback="OVITO analysis failed. Verify ovito is installed and that frames exist in /app/work/run0/frames/ before retrying analysis."`
+
+**LAMMPS failed exit 143:** explorer_complete, no frames -> `next="explorer"`, `feedback="run_lammps returned exit 143 (MPI SIGTERM). Check that get_resources was called first and in_pbs is true. Do not use submit_task for LAMMPS."`
+
+**Missing input file:** explorer_complete, cp failed -> `next="explorer"`, `feedback="Input file copy failed. Verify AW.tersoff, data.init, and in.watbox all exist in /app/data/."`
+
+---
+
 ## Notes
 
-- After a successful run (exit 0, results.csv present), route to "end"
+- After a successful run (exit 0, results.csv and animation.gif present), route to "end"
 - Explorer revision trigger: any tool call failure that is not a missing pip package
 - Never route back to planner unless the task description itself was wrong (rare)

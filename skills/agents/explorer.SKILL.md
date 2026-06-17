@@ -22,7 +22,8 @@ approach in real time.
 | `get_resources` | Query available compute resources (nodes, ranks, launcher) | **First call in HPC env** — before writing any MPI command. Check `warning` field in the response. |
 | `submit_task` | Execute Python code via workflow engine | Scientific computation (LAMMPS, OVITO), data processing, plotting |
 | `submit_shell_task` | Run shell commands | File operations (cp, mkdir, ls), non-MPI system commands |
-| `submit_mpi_task` | Run a command under MPI (mpirun -np N) | MPI-capable executables: LAMMPS binary, mpi4py scripts |
+| Domain-specific tool | (see use-case skill) | If the planner names a specific tool (e.g. a simulation runner), call it directly — do not reimplement with `submit_task` |
+| `submit_mpi_task` | Run any command under MPI (mpirun -np N) | MPI-capable executables when no domain-specific tool is available |
 | `get_task_status` | Check task status | After submitting a task, to monitor progress |
 | `get_task_result` | Get full task output | After task completes, to see stdout/stderr |
 | `list_tasks` | List all tasks | To review what has been submitted and their statuses |
@@ -70,10 +71,11 @@ After the PBS check (or immediately, for local env):
 ### Phase 2: Task Execution
 
 For each task from the planner:
-1. Determine if it needs Python code (`submit_task`) or shell commands (`submit_shell_task`)
-2. Submit the task, noting the returned task_id
-3. Verify the output (`list_files`, `read_file`)
-4. If it failed, diagnose and fix (see Error Recovery below)
+1. **If the task names a specific tool** (e.g. `run_lammps`, `run_ovito`), call that tool directly — do NOT reimplement it with `submit_task`
+2. Otherwise, determine if it needs Python code (`submit_task`) or shell commands (`submit_shell_task`)
+3. Submit the task, noting the returned task_id
+4. Verify the output (`list_files`, `read_file`)
+5. If it failed, diagnose and fix (see Error Recovery below)
 
 ### Phase 3: Validation
 

@@ -20,6 +20,14 @@ molecular nucleation / water crystallization simulation.
 
 ---
 
+## Domain-Specific Tools (this use case)
+
+| Tool | Purpose |
+|---|---|
+| `run_lammps` | Run the LAMMPS simulation. Auto-selects mpirun+binary on HPC, Python API locally. Call directly — never reimplement with `submit_task`. |
+
+---
+
 ## Workflow Overview
 
 The workflow has 3 main stages:
@@ -31,37 +39,25 @@ The workflow has 3 main stages:
 
 ## Stage 1: LAMMPS Simulation
 
-### Setup (submit_task)
-```bash
-mkdir -p /app/work/run0/frames
-cp /app/data/data.init /app/work/run0/
+### Setup
+Use `submit_shell_task` to create directories and copy all input files:
+```
+mkdir -p /app/work/run0/frames /app/work/run0/renders
 cp /app/data/AW.tersoff /app/work/run0/
+cp /app/data/data.init /app/work/run0/
 cp /app/data/in.watbox /app/work/run0/
 ```
 
-### Run LAMMPS (run_python)
-```python
-import os
-os.chdir("/app/work/run0")
-os.makedirs("frames", exist_ok=True)
-
-from lammps import lammps
-lmp = lammps(cmdargs=["-screen", "none"])
-lmp.file("/app/work/run0/in.watbox")
-lmp.close()
-print("LAMMPS complete")
+### Run LAMMPS
+Call the `run_lammps` tool directly — do NOT use `submit_task` or write Python code for this:
 ```
-
-**CRITICAL rules:**
-- `os.chdir("/app/work/run0")` BEFORE creating the lammps instance -- in.watbox dumps to "frames/" relative to CWD
-- Use `from lammps import lammps` -- Python API, NOT subprocess
-- `cmdargs=["-screen", "none"]` to suppress terminal output
-- NEVER modify the input script (in.watbox) -- run it as-is
-- After running, verify frames exist: `list_files("/app/work/run0/frames")`
+run_lammps(script="in.watbox", work_dir="/app/work/run0")
+```
+The server handles HPC vs local execution automatically. Never modify in.watbox.
 
 ### Expected output
-- `/app/work/run0/frames/step.*.lammpstrj` -- trajectory files (one per dump interval)
-- `/app/work/run0/log.lammps` -- LAMMPS log file
+- `/app/work/run0/frames/step.*.lammpstrj` — trajectory files
+- `/app/work/run0/log.lammps` — LAMMPS log
 
 ---
 
@@ -246,11 +242,11 @@ print("Timeseries plot saved")
 
 | Pitfall | Solution |
 |---|---|
-| LAMMPS can't find data.init | Copy ALL data files to work_dir BEFORE running LAMMPS |
-| Frames directory empty | Must `os.chdir(work_dir)` before `lammps()` -- dumps are relative to CWD |
+| LAMMPS can't find data.init | Copy ALL data files to work_dir BEFORE calling run_lammps |
+| Frames directory empty | Verify data files were copied before run_lammps; check run_lammps stderr |
 | OVITO counts are all zero | Use types 1+2+3 for cubic and 4+5+6 for hexagonal (not just 1 and 4) |
 | matplotlib display error | Use `matplotlib.use("Agg")` for headless rendering |
-| `from lammps import lammps` fails | Check package: `check_package("lammps")`, install if missing |
+| run_lammps fails exit 143 | MPI init error — the run_lammps tool handles this; check get_resources first |
 
 ---
 

@@ -51,30 +51,9 @@ Use serial or thread-parallel single-process approaches only.
 
 ---
 
-## Parsl Config for Local Execution
+## Parsl Config
 
-```python
-from parsl.config import Config
-from parsl.executors import HighThroughputExecutor
-from parsl.providers import LocalProvider
-import parsl
-
-config = Config(
-    executors=[
-        HighThroughputExecutor(
-            label="local_htex",
-            cores_per_worker=1,
-            provider=LocalProvider(
-                min_blocks=1,
-                max_blocks=1,
-                init_blocks=1,
-            ),
-        )
-    ],
-    strategy="none",
-)
-parsl.load(config)
-```
+For Parsl config, load the `systems/parsl` skill — the local single-node config is documented there.
 
 ---
 

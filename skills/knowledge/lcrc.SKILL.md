@@ -88,35 +88,9 @@ prepends `mpirun -np N` so you don't need to hardcode the rank count.
 
 ---
 
-## Parsl Config for HPC (Inside an Existing PBS Job)
+## Parsl Config
 
-When MAW is running inside a PBS job, use LocalProvider scaled to the number
-of allocated nodes — do not submit new PBS jobs from within the agent:
-
-```python
-from parsl.config import Config
-from parsl.executors import HighThroughputExecutor
-from parsl.providers import LocalProvider
-import parsl, os
-
-n_workers = int(os.environ.get("PBS_NUM_NODES", 1))
-
-config = Config(
-    executors=[
-        HighThroughputExecutor(
-            label="htex_lcrc",
-            cores_per_worker=1,
-            provider=LocalProvider(
-                min_blocks=n_workers,
-                max_blocks=n_workers,
-                init_blocks=n_workers,
-            ),
-        )
-    ],
-    strategy="none",
-)
-parsl.load(config)
-```
+For Parsl config, load the `systems/parsl` skill — the HPC PBS config (scaled to `PBS_NUM_NODES`) is documented there.
 
 ---
 
@@ -129,8 +103,10 @@ parsl.load(config)
 | `/scratch` | 15 GB node-local scratch — cleared after job ends, never store venv here |
 
 Store the project repo and venv under `/lcrc/project/`.
-Output from workflow runs goes to `/lcrc/project/<project>/work/run0/` or globalscratch
-for large intermediate files.
+
+**In task code and planner task lists, always use `/app/` paths** — the MCP server
+resolves them to the actual repo location automatically. Never write `/lcrc/project/`
+or any absolute cluster path in task instructions or Python code.
 
 ---
 

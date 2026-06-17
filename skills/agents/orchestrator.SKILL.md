@@ -136,4 +136,4 @@ The available use cases and systems are listed in your context when the node run
 
 **Explorer success:** explorer_complete, all tasks done, output files present -> `next="end"`, `feedback=""`
 
-**Explorer partial failure:** explorer_complete, LAMMPS ran but OVITO failed -> `next="explorer"`, `feedback="OVITO analysis failed with ImportError. Verify ovito package is installed and retry the analysis step."`
+**Explorer partial failure:** explorer_complete, some tasks succeeded but others failed -> `next="explorer"`, `feedback="<failed task name> failed with <error type>. <specific fix>."`  See use-case orchestrator skill for domain-specific error patterns.

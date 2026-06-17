@@ -14,7 +14,9 @@ Usage:
 """
 
 import os
+import base64
 import json
+import mimetypes
 import operator
 import subprocess
 import warnings
@@ -60,6 +62,7 @@ class AgentState(TypedDict):
     requirements:          str
     requirements_approved: bool
     image_tag:             str
+    image_path:            str              # path to user-uploaded image for planning (optional)
     current_step:          str
     orchestrator_feedback: str
     next:                  str
@@ -379,9 +382,25 @@ def planner(state: AgentState) -> dict:
                          "\n".join(f"  - {f}" for f in _data_files)) if _data_files else ""
         _human = f"Goal: {state['goal']}{_data_section}{paper_section}{feedback_section}"
 
+        # Build human message — multimodal if an image was provided
+        if state.get("image_path"):
+            console.print("\n[dim cyan][planner] loading image...[/dim cyan]")
+            with open(state["image_path"], "rb") as _f:
+                _img_bytes = _f.read()
+            _b64 = base64.b64encode(_img_bytes).decode()
+            _mime, _ = mimetypes.guess_type(state["image_path"])
+            _mime = _mime or "image/png"
+            _human_msg = HumanMessage(content=[
+                {"type": "image_url", "image_url": {"url": f"data:{_mime};base64,{_b64}"}},
+                {"type": "text", "text": _human},
+            ])
+            console.print(f"[dim cyan][planner] image loaded ({_mime}, {len(_img_bytes)//1024}KB)[/dim cyan]")
+        else:
+            _human_msg = HumanMessage(content=_human)
+
         result: PlannerOutput = _invoke_structured(model, PlannerOutput, [
             SystemMessage(content=_sys_prompt),
-            HumanMessage(content=_human),
+            _human_msg,
         ])
 
         # Two-pass: if sub-skills requested, load them and re-invoke once
@@ -391,7 +410,7 @@ def planner(state: AgentState) -> dict:
                 _enriched = _sys_prompt + f"\n\n=== Loaded Skills ===\n{_sub}\n\n(Final pass -- do not set skill_requests.)"
                 result = _invoke_structured(model, PlannerOutput, [
                     SystemMessage(content=_enriched),
-                    HumanMessage(content=_human),
+                    _human_msg,
                 ])
 
         console.print(f"[dim cyan][planner] produced {len(result.tasks)} tasks[/dim cyan]")
@@ -544,6 +563,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MAW -- Multi-Agent Workflow (MCP Approach)")
     parser.add_argument("--paper", type=str, help="Path to the PDF paper or paper index (1-based)")
     parser.add_argument("--skip-paper", action="store_true", help="Skip paper selection and plan from goal text only")
+    parser.add_argument("--image", type=str, help="Path to image file (diagram/figure) to use for planning")
     parser.add_argument("--goal", type=str, help="Goal for the workflow")
     parser.add_argument("--engine", type=str, default="parsl",
                         choices=["parsl", "pycompss"],
@@ -596,6 +616,41 @@ if __name__ == "__main__":
 
         if pdf_path:
             console.print(f"[dim]Selected: {os.path.basename(pdf_path)}[/dim]")
+
+    # Handle image selection
+    _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+    images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
+    os.makedirs(images_dir, exist_ok=True)
+
+    if args.image:
+        image_path = args.image if os.path.isabs(args.image) else os.path.join(images_dir, args.image)
+        if not os.path.isfile(image_path):
+            console.print(f"[red]Image not found: {args.image}[/red]")
+            raise SystemExit(1)
+        console.print(f"[dim]Image: {os.path.basename(image_path)}[/dim]")
+    else:
+        images = sorted(
+            f for f in os.listdir(images_dir)
+            if os.path.splitext(f)[1].lower() in _IMAGE_EXTS
+        )
+        if not images:
+            image_path = ""
+        else:
+            console.print("\n[bold]Available images:[/bold]")
+            for i, name in enumerate(images, 1):
+                console.print(f"  {i}. {name}")
+            console.print(f"  0. Skip -- no image")
+            choice = input("\nSelect an image by number (or 0 to skip): ").strip()
+            if choice == "0" or not choice:
+                image_path = ""
+                console.print("[dim]No image selected.[/dim]")
+            else:
+                try:
+                    image_path = os.path.join(images_dir, images[int(choice) - 1])
+                    console.print(f"[dim]Selected: {os.path.basename(image_path)}[/dim]")
+                except (ValueError, IndexError):
+                    console.print("[red]Invalid selection -- no image will be used.[/red]")
+                    image_path = ""
 
     # Handle data file selection
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -653,6 +708,7 @@ if __name__ == "__main__":
         "requirements":          "",
         "requirements_approved": False,
         "image_tag":             "",
+        "image_path":            image_path,
         "current_step":          "start",
         "orchestrator_feedback": "",
         "next":                  "",

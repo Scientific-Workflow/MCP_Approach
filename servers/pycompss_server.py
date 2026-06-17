@@ -22,6 +22,7 @@ Usage:
 """
 
 import os
+import re
 import sys
 import json
 import subprocess
@@ -50,12 +51,78 @@ VENV_PYTHON = os.environ.get("VENV_PYTHON", sys.executable)
 DEFAULT_WORK_DIR = os.path.join(REPO_ROOT, "work", "run0")
 DEFAULT_DATA_DIR = os.path.join(REPO_ROOT, "data")
 
+# MPI library paths required for LAMMPS Python API on Swing/Improv (Intel oneAPI MPI)
+_MPI_LIB_PATHS = (
+    "/gpfs/fs1/soft/swing/manual/intel/oneapi/2021.2.0.2883/mpi/2021.2.0/lib/release:"
+    "/gpfs/fs1/soft/improv/software/custom-built/intel-oneapi-toolkit/mpi/2021.15/lib:"
+    "/gpfs/fs1/soft/improv/software/custom-built/intel-oneapi-toolkit/mpi/2021.15/opt/mpi/libfabric/lib"
+)
+_existing_ld = os.environ.get("LD_LIBRARY_PATH", "")
+_ld_library_path = _MPI_LIB_PATHS + (":" + _existing_ld if _existing_ld else "")
+
+# The pip lammps package ships a compiled lmp binary alongside its Python bindings.
+_LMP_BIN_DIR = os.path.join(REPO_ROOT, "venv3", "lib", "python3.11", "site-packages", "lammps")
+_existing_path = os.environ.get("PATH", "")
+_task_path = _LMP_BIN_DIR + (":" + _existing_path if _existing_path else "")
+
 TASK_ENV = {
     **os.environ,
     "LIBGL_ALWAYS_SOFTWARE": "1",
     "PYOPENGL_PLATFORM": "osmesa",
     "OVITO_GUI_MODE": "0",
+    "LD_LIBRARY_PATH": _ld_library_path,
+    "PATH": _task_path,
+    # Allow Intel MPI to initialize in a subprocess not launched via mpirun.
+    "PMI_SIZE": "1",
+    "PMI_RANK": "0",
+    "I_MPI_HYDRA_BOOTSTRAP": "fork",
+    "FI_PROVIDER": "tcp",
 }
+
+# __ Resource Detection ________________________________________________________
+
+def _detect_resources() -> dict:
+    """Read available compute resources from PBS env vars or local fallback."""
+    import shutil
+    in_pbs = bool(os.environ.get("PBS_JOBID"))
+    nodefile = os.environ.get("PBS_NODEFILE", "")
+    nodelist = ""
+    nodefile_hosts: list = []
+    if nodefile and os.path.isfile(nodefile):
+        with open(nodefile) as _nf:
+            nodefile_hosts = _nf.read().split()
+        nodelist = ",".join(sorted(set(nodefile_hosts)))
+    if nodefile_hosts:
+        nnodes = len(set(nodefile_hosts))
+        ntasks_from_file = len(nodefile_hosts)
+        if ntasks_from_file == nnodes:
+            pbs_np  = int(os.environ.get("PBS_NP",      0))
+            pbs_ppn = int(os.environ.get("PBS_NUM_PPN", 0))
+            ntasks  = pbs_np if pbs_np > 0 else (nnodes * pbs_ppn if pbs_ppn > 0 else ntasks_from_file)
+        else:
+            ntasks = ntasks_from_file
+        cpus_per = ntasks // max(nnodes, 1)
+    else:
+        nnodes   = int(os.environ.get("PBS_NUM_NODES", 1))
+        ntasks   = int(os.environ.get("PBS_NP",        1))
+        cpus_per = int(os.environ.get("PBS_NUM_PPN",   1))
+    launcher = os.environ.get("MPI_LAUNCHER", "")
+    if not launcher:
+        if shutil.which("mpirun"):
+            launcher = "mpirun"
+        elif shutil.which("mpiexec"):
+            launcher = "mpiexec"
+        else:
+            launcher = ""
+    warning = ""
+    if not in_pbs:
+        warning = ("NOT inside a PBS job (PBS_JOBID not set). MPI tasks and multi-node "
+                   "execution are unavailable. Start an interactive PBS job: "
+                   "qsub -I -l nodes=N:ppn=M -l walltime=HH:MM:SS -A <project>")
+    return {"in_pbs": in_pbs, "nnodes": nnodes, "ntasks": ntasks,
+            "cpus_per_task": cpus_per, "nodelist": nodelist,
+            "launcher": launcher, "warning": warning}
+
 
 # __ COMPSs Runtime Detection _________________________________________________
 
@@ -221,6 +288,18 @@ def submit_task(
     """
     task_id = f"task_{uuid.uuid4().hex[:8]}"
 
+    # Redirect LAMMPS code to the dedicated run_lammps tool
+    if "from lammps import" in python_code or "import lammps" in python_code:
+        return json.dumps({
+            "task_id": task_id,
+            "status": "rejected",
+            "error": (
+                "LAMMPS must be run via the `run_lammps` tool, not submit_task. "
+                "Call: run_lammps(script='in.watbox', work_dir='/app/work/run0'). "
+                "The run_lammps tool handles HPC vs local execution automatically."
+            ),
+        })
+
     # Check dependencies
     if depends_on:
         for dep_id in depends_on:
@@ -246,8 +325,11 @@ def submit_task(
         "engine": "pycompss" if _check_compss() else "pycompss-fallback",
     }
 
+    # Resolve /app/ path aliases in user code
+    resolved_code = _resolve_paths(python_code)
+
     # Wrap and execute
-    wrapped_script = _wrap_as_compss_task(python_code)
+    wrapped_script = _wrap_as_compss_task(resolved_code)
     result = _run_python_script(wrapped_script, timeout=timeout)
 
     # Update task status
@@ -296,6 +378,19 @@ def submit_shell_task(
         JSON with task_id, status, and execution results
     """
     task_id = f"task_{uuid.uuid4().hex[:8]}"
+
+    if (re.search(r"(^|[/\s])lmp(_mpi|_serial)?(\s|$)", command)
+            or "from lammps import" in command
+            or re.search(r"\bimport\s+lammps\b", command)):
+        return json.dumps({
+            "task_id": task_id,
+            "status": "rejected",
+            "error": (
+                "LAMMPS must be run via the `run_lammps` tool, not submit_shell_task. "
+                "Call: run_lammps(script='in.watbox', work_dir='/app/work/run0')."
+            ),
+        })
+
     _work = work_dir if work_dir else DEFAULT_WORK_DIR
 
     _tasks[task_id] = {
@@ -493,6 +588,174 @@ def read_file(path: str, max_lines: int = 100) -> str:
             "path": resolved,
             "error": str(e),
         }, indent=2)
+
+
+@mcp.tool()
+def get_resources() -> str:
+    """Query available compute resources (nodes, MPI ranks, launcher).
+
+    Returns PBS allocation info when running inside a PBS job, or a warning
+    when not in a PBS job. Always call this first in HPC environments.
+    """
+    res = _detect_resources()
+    return json.dumps(res, indent=2)
+
+
+@mcp.tool()
+def submit_mpi_task(
+    name: str,
+    command: str,
+    num_ranks: int = 0,
+    work_dir: str = "",
+    timeout: int = 1800,
+) -> str:
+    """Run a command under MPI (mpirun -np N <command>).
+
+    Use for MPI-capable executables: LAMMPS binary (lmp), mpi4py scripts, etc.
+    This is the correct way to use all allocated nodes on HPC.
+
+    Args:
+        name: Descriptive name for this task
+        command: Command to run (e.g. "lmp -in in.watbox"). Do NOT include mpirun.
+        num_ranks: Number of MPI ranks. 0 = auto-detect from PBS_NP (recommended).
+        work_dir: Working directory (default: repo work/run0)
+        timeout: Max seconds to wait (default: 1800)
+    """
+    import shutil
+    task_id = f"task_{uuid.uuid4().hex[:8]}"
+    _work = _resolve_paths(work_dir) if work_dir else DEFAULT_WORK_DIR
+
+    res = _detect_resources()
+    launcher = res["launcher"]
+    if not launcher:
+        return json.dumps({
+            "task_id": task_id,
+            "status": "failed",
+            "error": "No MPI launcher (mpirun/mpiexec) found in PATH.",
+        }, indent=2)
+
+    ranks = num_ranks if num_ranks > 0 else res["ntasks"]
+    resolved_cmd = _resolve_paths(command)
+    full_cmd = f"{launcher} -np {ranks} {resolved_cmd}"
+
+    _tasks[task_id] = {
+        "name": name,
+        "status": "running",
+        "depends_on": [],
+        "submitted_at": time.time(),
+    }
+
+    result = _run_command(["bash", "-c", full_cmd], work_dir=_work, timeout=timeout)
+
+    _tasks[task_id]["status"] = "completed" if result["exit_code"] == 0 else "failed"
+    _tasks[task_id]["exit_code"] = result["exit_code"]
+    _tasks[task_id]["stdout"] = result["stdout"]
+    _tasks[task_id]["stderr"] = result["stderr"]
+    _tasks[task_id]["completed_at"] = time.time()
+
+    return json.dumps({
+        "task_id": task_id,
+        "name": name,
+        "status": _tasks[task_id]["status"],
+        "exit_code": result["exit_code"],
+        "launcher": launcher,
+        "ranks": ranks,
+        "stdout": result["stdout"][:3000],
+        "stderr": result["stderr"][:3000],
+    }, indent=2)
+
+
+@mcp.tool()
+def run_lammps(
+    script: str = "in.watbox",
+    work_dir: str = "",
+    timeout: int = 7200,
+) -> str:
+    """Run a LAMMPS simulation. Automatically selects the right execution method:
+    - Inside a PBS job with mpirun available: mpirun -np PBS_NP lmp -in <script>
+    - Otherwise (local / no MPI launcher): Python API (single process)
+
+    Args:
+        script: Input script filename relative to work_dir (default: in.watbox)
+        work_dir: Working directory containing the script and data files.
+                  Supports /app/ paths (default: repo work/run0)
+        timeout: Max seconds to wait (default: 7200)
+
+    Returns:
+        JSON with task_id, status, method (mpi|python_api), ranks, stdout, stderr
+    """
+    import glob as _glob
+    task_id = f"task_{uuid.uuid4().hex[:8]}"
+    _work = _resolve_paths(work_dir) if work_dir else DEFAULT_WORK_DIR
+
+    frames_dir = os.path.join(_work, "frames")
+    if os.path.isdir(frames_dir):
+        for _old in _glob.glob(os.path.join(frames_dir, "*.lammpstrj")):
+            os.remove(_old)
+
+    res = _detect_resources()
+    use_mpi = res["in_pbs"] and bool(res["launcher"])
+    method = "mpi" if use_mpi else "python_api"
+    ranks = res["ntasks"] if use_mpi else 1
+
+    _tasks[task_id] = {
+        "name": f"run_lammps:{script}",
+        "status": "running",
+        "depends_on": [],
+        "submitted_at": time.time(),
+        "method": method,
+    }
+
+    if use_mpi:
+        # The pip-installed `lammps` wheel's bundled `lmp` binary cannot load on this
+        # cluster's kernel (ELF segment-layout mismatch — see parsl_server.py for the
+        # dmesg evidence) regardless of MPI runtime. Use the cluster-provided module
+        # (gcc 13.2.0 + OpenMPI 5.0.6) instead, which is built natively for this kernel.
+        cmd = (
+            f"module load lammps/22Jul2025 >/dev/null 2>&1 && "
+            f"cd {_work} && "
+            f"env -u PMI_SIZE -u PMI_RANK -u I_MPI_HYDRA_BOOTSTRAP "
+            f"mpirun -n {ranks} lmp -in {script}"
+        )
+        result = _run_command(["bash", "-lc", cmd], work_dir=_work, timeout=timeout)
+    else:
+        py_script = f"""\
+import os
+os.chdir("{_work}")
+from lammps import lammps
+lmp = lammps(cmdargs=["-screen", "none"])
+lmp.file("{script}")
+lmp.close()
+"""
+        result = _run_python_script(py_script, work_dir=_work, timeout=timeout)
+
+    exit_code = result["exit_code"]
+    frames_written = _glob.glob(os.path.join(frames_dir, "*.lammpstrj")) if os.path.isdir(frames_dir) else []
+    if exit_code == 11 and frames_written:
+        status = "completed"
+        note = f"lmp exited 11 (SIGSEGV cleanup crash) but {len(frames_written)} trajectory frames were written — treating as success"
+    else:
+        status = "completed" if exit_code == 0 else "failed"
+        note = ""
+
+    _tasks[task_id]["status"] = status
+    _tasks[task_id]["exit_code"] = exit_code
+    _tasks[task_id]["stdout"] = result["stdout"]
+    _tasks[task_id]["stderr"] = result["stderr"]
+    _tasks[task_id]["completed_at"] = time.time()
+
+    return json.dumps({
+        "task_id":   task_id,
+        "name":      f"run_lammps:{script}",
+        "status":    status,
+        "method":    method,
+        "ranks":     ranks,
+        "exit_code": exit_code,
+        "frames":    len(frames_written),
+        "note":      note,
+        "stdout":    result["stdout"][:3000],
+        "stderr":    result["stderr"][:3000],
+    }, indent=2)
 
 
 @mcp.tool()

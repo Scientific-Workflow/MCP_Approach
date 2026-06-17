@@ -24,7 +24,7 @@ Parsl wraps Python functions with `@python_app` to run them as managed tasks. Ta
 
 ---
 
-## Exact Config for This Project
+## Config — Local (single node)
 
 ```python
 from parsl.config import Config
@@ -50,6 +50,35 @@ parsl.load(config)
 ```
 
 **CRITICAL:** Do NOT add `max_workers`, `max_workers_per_node`, or any kwargs not shown. They cause `TypeError` in recent Parsl versions.
+
+## Config — HPC (inside existing PBS job)
+
+Scale workers to the number of allocated nodes. Do NOT submit new PBS jobs from within the agent.
+
+```python
+from parsl.config import Config
+from parsl.executors import HighThroughputExecutor
+from parsl.providers import LocalProvider
+import parsl, os
+
+n_workers = int(os.environ.get("PBS_NUM_NODES", 1))
+
+config = Config(
+    executors=[
+        HighThroughputExecutor(
+            label="htex_lcrc",
+            cores_per_worker=1,
+            provider=LocalProvider(
+                min_blocks=n_workers,
+                max_blocks=n_workers,
+                init_blocks=n_workers,
+            ),
+        )
+    ],
+    strategy="none",
+)
+parsl.load(config)
+```
 
 ---
 

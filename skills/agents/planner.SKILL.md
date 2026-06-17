@@ -71,13 +71,13 @@ Each of these is its own task:
 ### Example: 4 tasks for a simulation step
 
 Instead of:
-> "Run LAMMPS and analyze the output"
+> "Run the simulation and analyze the output"
 
 Write:
-1. "Copy force field, data, and input script files to /app/work/run0/ using submit_shell_task. Always re-copy the input script fresh — never skip."
-2. "Run LAMMPS via submit_task: call os.chdir('/app/work/run0') BEFORE creating the lammps instance — dump paths in the input script are relative to CWD. Use Python API: from lammps import lammps; lmp = lammps(cmdargs=['-screen','none']); lmp.file('in.watbox'); lmp.close()"
-3. "Verify output: use list_files to confirm trajectory files exist in /app/work/run0/frames/ before proceeding to analysis."
-4. "Run OVITO analysis via submit_task: load trajectory with ovito.io.import_file, apply IdentifyDiamondModifier, write results.csv"
+1. "Copy input files to /app/work/run0/ using submit_shell_task. Always re-copy fresh."
+2. "Run the simulation using the appropriate tool per the use-case skill."
+3. "Verify output: use list_files to confirm output files exist before proceeding."
+4. "Run analysis via submit_task: load output, apply analysis, write results.csv."
 
 ---
 
@@ -87,12 +87,12 @@ A complete task list must cover ALL of these phases:
 
 | Phase | Min tasks |
 |---|---|
-| Package verification (check_package for each required tool) | 1–2 |
+| Package verification (`check_package` for each required tool) | 1–2 |
 | Directory and file setup (mkdir, copy data files) | 1–2 |
-| Primary simulation (submit_task with inline Python — critical ordering requirements each get their own task) | 2–3 |
-| Simulation output verification (list_files to confirm output exists) | 1 |
-| Analysis (submit_task with inline Python) | 2–3 |
-| Visualization / per-frame rendering (submit_task) | 1–2 |
+| Primary simulation (use the tool specified in the use-case skill) | 1 |
+| Simulation output verification (`list_files` to confirm output exists) | 1 |
+| Analysis (`submit_task` with inline Python) | 2–3 |
+| Visualization / per-frame rendering (`submit_task`) | 1–2 |
 | Animation assembly | 1 |
 | Time series or summary plot | 1–2 |
 
@@ -117,8 +117,9 @@ If the input ends with "Orchestrator feedback", fix every issue. Do not repeat t
 Before finalizing:
 - [ ] 10+ tasks, not 3
 - [ ] No task says "write a @python_app", "write a main()", or "write a bash launcher" — those are artifact approach patterns, not MCP
-- [ ] Every critical ordering requirement (chdir before lammps, copy before run) is its own task
-- [ ] Specific API names used (not "run the simulation" but "call `lmp.file()`")
+- [ ] All paths use `/app/` — never cluster-specific paths like `/lcrc/project/`, `/gpfs/`
+- [ ] Every critical ordering requirement (copy before run, verify before analysis) is its own task
+- [ ] Simulation tool matches what the use-case skill specifies — not a generic `submit_task`
 - [ ] Visualization colors, atom sizes, and output formats are specified per task
 - [ ] A verification step (list_files) exists after the simulation before analysis
 - [ ] Stack and tasks match the environment constraints from the loaded knowledge skill

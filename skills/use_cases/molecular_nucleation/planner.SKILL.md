@@ -96,10 +96,10 @@ Each task maps to one or a few `submit_task` or `submit_shell_task` calls.
    AW.tersoff, data.init, and in.watbox from /app/data/. Always re-copy in.watbox
    fresh — the user may have edited it."
 
-4. "Run the LAMMPS simulation via submit_task. CRITICAL: call os.chdir('/app/work/run0')
-   BEFORE creating the lammps instance — dump paths in in.watbox are relative to CWD.
-   Use Python API only: from lammps import lammps; lmp = lammps(cmdargs=['-screen','none']);
-   lmp.file('/app/work/run0/in.watbox'); lmp.close(). Never modify in.watbox."
+4. "Run the LAMMPS simulation via the run_lammps tool:
+   run_lammps(script='in.watbox', work_dir='/app/work/run0').
+   The server automatically selects mpirun+binary on HPC or Python API locally.
+   Never modify in.watbox."
 
 5. "Verify simulation output via list_files on /app/work/run0/frames/ — confirm
    .lammpstrj trajectory files exist before proceeding to analysis."
@@ -129,9 +129,10 @@ Each task maps to one or a few `submit_task` or `submit_shell_task` calls.
 
 ## Key Rules
 
+- **LAMMPS task MUST use `run_lammps`** — do NOT use `submit_task`, `submit_mpi_task`, or any other tool for running LAMMPS. `run_lammps` handles HPC vs local automatically.
+- **All paths in tasks MUST use `/app/`** — never use `/lcrc/project/`, `/gpfs/`, `/scratch/`, or any cluster-specific path. `/app/` is always resolved correctly by the server regardless of environment.
 - Do NOT add tasks for "install LAMMPS" or "set up the venv" — the environment is pre-built
 - Do NOT write tasks that say "write a @python_app", "write a main()", or "write a bash launcher"
-- Do NOT add tasks involving MPI or multi-node unless the environment knowledge explicitly supports it
 - If the paper uses a parameter not in the current in.watbox, note it in literature_findings but do NOT hardcode it — in.watbox controls the simulation and must be used as-is
 - The input script (in.watbox) is user-controlled; the explorer must never modify it
 
@@ -153,7 +154,7 @@ Each task maps to one or a few `submit_task` or `submit_shell_task` calls.
     "Check that ovito, numpy, matplotlib, Pillow are installed via check_package.",
     "Create /app/work/run0/frames/ and /app/work/run0/renders/ via submit_shell_task.",
     "Copy AW.tersoff, data.init, in.watbox from /app/data/ to /app/work/run0/ via submit_shell_task — always re-copy in.watbox.",
-    "Run LAMMPS: on HPC use submit_mpi_task(command='cd /app/work/run0 && lmp -in in.watbox', num_ranks=0); on local use submit_task Python API with os.chdir first.",
+    "Run LAMMPS via run_lammps(script='in.watbox', work_dir='/app/work/run0'). Server picks mpirun+binary or Python API automatically.",
     "Verify frames exist in /app/work/run0/frames/ via list_files before proceeding.",
     "Run OVITO analysis via submit_task: IdentifyDiamondModifier, cubic=types 1+2+3, hexagonal=types 4+5+6, write results.csv.",
     "Render frames via submit_task: matplotlib Agg backend, color by structure type, s=25 min, save PNGs to renders/.",
