@@ -1,6 +1,18 @@
 """
 MCP Tools -- Client wrapper that connects to a Workflow Engine MCP Server.
 
+STATUS: CURRENTLY UNUSED (retained for future use)
+This module is not imported by any other file in the project as of June 17, 2026.
+During the refactoring of mcp_explorer.py, the explorer was changed to connect
+directly to the MCP server via mcp.client.stdio, bypassing this intermediate
+client layer. This file is kept because:
+  1. It defines the ENGINE_SERVERS registry and async connect/disconnect lifecycle
+     that may be useful if the architecture is refactored again.
+  2. It provides clean async convenience wrappers (submit_task, list_files, etc.)
+     that could serve as a standalone MCP client library.
+  3. It documents the original design intent of separating the MCP client logic
+     from the explorer agent logic.
+
 This module provides the bridge between the explorer agent (LangChain tools)
 and the MCP server (Parsl, PyCOMPSs, etc.). It starts the MCP server as a
 subprocess, connects via stdio, and exposes the server's tools as local
