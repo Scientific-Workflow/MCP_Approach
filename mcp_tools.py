@@ -61,8 +61,7 @@ _SERVER_PYTHON = _resolve_server_python()
 ENGINE_SERVERS = {
     "parsl": os.path.join(_SERVERS_DIR, "parsl_server.py"),
     "pycompss": os.path.join(_SERVERS_DIR, "pycompss_server.py"),
-    # Future engines:
-    # "adios": os.path.join(_SERVERS_DIR, "adios_server.py"),
+    "adios": os.path.join(_SERVERS_DIR, "adios_server.py"),
 }
 
 
