@@ -130,6 +130,7 @@ If the input ends with "Orchestrator feedback", fix every issue raised before re
 
 
 # __ Project layout (injected into context) ____________________________________
+######################################################################## Project layout -- this is injected into the system prompt for all agents, so they understand where to read/write files and how the repo maps to runtime paths. Update as needed for your project. ################################################################
 
 PROJECT_LAYOUT = """\
 Repo directory tree -- the repo root is mapped to /app/ at runtime:
@@ -179,6 +180,7 @@ def _invoke_structured(llm, schema, messages, retries=5):
 
 
 # __ Skill file helpers ________________________________________________________
+############################################################################# SKILL FILE MANAGEMENT: read .SKILL.md files for orchestrator and planner, with support for sub-skill requests #################################
 
 _SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
 
@@ -333,7 +335,7 @@ def orchestrator(state: AgentState) -> dict:
         **revision_update,
     }
 
-################################################################################## PLANNER ##############################################################
+################################################################################## PLANNER ####################################################################################
 def planner(state: AgentState) -> dict:
     try:
         console.print("\n[dim cyan][planner] reading PDF...[/dim cyan]")
@@ -481,8 +483,8 @@ def installer(state: AgentState) -> dict:
         console.print(f"[red][installer] ERROR: {e}[/red]")
         raise
 
-
 # __ Graph _____________________________________________________________________
+####################################################################################### LangGraph Nodes #######################################################################################################
 
 def route_orchestrator(state: AgentState) -> str:
     return state["next"]
@@ -512,6 +514,7 @@ app = graph.compile()
 
 
 # __ Run _______________________________________________________________________
+######################################################################### Console Terminal CLI DISPLAY AND RUN LOGGING ################################################################
 
 if __name__ == "__main__":
     import argparse
@@ -520,7 +523,7 @@ if __name__ == "__main__":
     parser.add_argument("--paper", type=str, help="Path to the PDF paper or paper index (1-based)")
     parser.add_argument("--goal", type=str, help="Goal for the workflow")
     parser.add_argument("--engine", type=str, default="parsl",
-                        choices=["parsl", "pycompss", "adios"],
+                        choices=["parsl", "pycompss"],
                         help="Workflow engine to use (default: parsl)")
     args = parser.parse_args()
 
@@ -609,6 +612,7 @@ if __name__ == "__main__":
     console.print(f"  Tool calls: {summary['tool_calls']} ({summary['tool_successes']} succeeded)")
     console.print(f"  Total time: {summary['total_duration_s']}s")
 
+################################################################### TOKEN USAGE SUMMARY (CHECK runs folder: xxxxxxxx_trace.json) ##################################################################)
     # Print token usage
     total_in = summary.get('total_input_tokens', 0)
     total_out = summary.get('total_output_tokens', 0)
