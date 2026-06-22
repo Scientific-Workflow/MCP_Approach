@@ -61,6 +61,14 @@ REPO_ROOT = os.environ.get(
 # If not set, uses the same Python as the server.
 VENV_PYTHON = os.environ.get("VENV_PYTHON", sys.executable)
 
+# Parsl's HighThroughputExecutor launches its interchange subprocess by bare name
+# ("interchange.py"), resolved via PATH -- not via VENV_PYTHON's directory. Without
+# this, parsl.load() fails with FileNotFoundError and _ensure_parsl() silently falls
+# back to plain subprocess execution (no real Parsl scheduling, no error surfaced).
+_venv_bin = os.path.dirname(VENV_PYTHON)
+if _venv_bin and _venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
+    os.environ["PATH"] = _venv_bin + os.pathsep + os.environ.get("PATH", "")
+
 # Default working directory for tasks
 DEFAULT_WORK_DIR = os.path.join(REPO_ROOT, "work", "run0")
 
@@ -110,20 +118,49 @@ _PARSL_LOADED = False
 
 
 def _build_parsl_config():
-    """Build a Parsl Config.
+    """Build a Parsl Config sized to the actual allocation (PBS_NODEFILE/PBS_NUM_PPN).
 
-    Local node: HighThroughputExecutor + LocalProvider (multi-worker on one node).
-    To scale across HPC nodes, swap LocalProvider for PBSProProvider/SlurmProvider
-    -- the rest of the server is unchanged.
+    We are always launched *inside* an already-granted PBS allocation (the explorer
+    skill requires `qsub -I` before starting the agent) -- so we never submit a new
+    job via PBSProProvider. Instead we stay on LocalProvider (use what we already
+    have) but size and launch it correctly:
+
+    - Outside PBS (local dev): 1 node, 1 worker, SingleNodeLauncher.
+    - Inside PBS, single node: 1 node, one worker per allocated core
+      (cpus_per_task from PBS_NUM_PPN/PBS_NODEFILE), SingleNodeLauncher.
+    - Inside PBS, multiple nodes: nodes_per_block = nnodes, MpiRunLauncher spreads
+      the worker pool across every host in PBS_NODEFILE via mpirun, with workers
+      per node again sized to cpus_per_task. address_by_hostname() is required here
+      so workers on other hosts can reach the interchange (loopback only works
+      for the launching node).
     """
     from parsl.config import Config
     from parsl.executors import HighThroughputExecutor
     from parsl.providers import LocalProvider
+    from parsl.launchers import SingleNodeLauncher, MpiRunLauncher
+    from parsl.addresses import address_by_hostname
+
+    res = _detect_resources()
+    nnodes = max(res["nnodes"], 1) if res["in_pbs"] else 1
+    workers_per_node = max(res["cpus_per_task"], 1) if res["in_pbs"] else 1
+    multi_node = res["in_pbs"] and nnodes > 1
+
+    executor_kwargs = dict(
+        label="mcp_htex",
+        provider=LocalProvider(
+            nodes_per_block=nnodes,
+            launcher=MpiRunLauncher() if multi_node else SingleNodeLauncher(),
+            init_blocks=1,
+            min_blocks=1,
+            max_blocks=1,
+        ),
+        max_workers_per_node=workers_per_node,
+    )
+    if multi_node:
+        executor_kwargs["address"] = address_by_hostname()
+
     return Config(
-        executors=[HighThroughputExecutor(
-            label="mcp_htex",
-            provider=LocalProvider(),
-        )],
+        executors=[HighThroughputExecutor(**executor_kwargs)],
         run_dir=os.path.join(DEFAULT_WORK_DIR, ".parsl"),  # keep Parsl logs out of repo root
     )
 
