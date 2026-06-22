@@ -33,7 +33,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
 from mcp_explorer import explorer
-from trace_logger import tracer
+from trace_logger import tracer, extract_usage
 
 load_dotenv()
 
@@ -158,12 +158,18 @@ HOST_REPO_PATH = os.environ.get("HOST_REPO_PATH", os.path.dirname(os.path.abspat
 
 # __ Structured output helper __________________________________________________
 
-def _invoke_structured(llm, schema, messages, retries=5):
+def _invoke_structured(llm, schema, messages, retries=5, agent_name=""):
     """Call llm and parse the response as schema, tolerating preamble text before the JSON block."""
     import json as _json, re as _re
     last_err = None
     for attempt in range(retries):
         response = llm.invoke(messages)
+        if agent_name:
+            usage = extract_usage(response)
+            if usage:
+                tracer.log_token_usage(agent_name, usage["input_tokens"],
+                                       usage["output_tokens"], usage["total_tokens"],
+                                       model=getattr(llm, "model_name", ""))
         text = response.content if hasattr(response, "content") else str(response)
         match = _re.search(r'\{.*\}', text, _re.DOTALL)
         if not match:
@@ -265,7 +271,7 @@ def orchestrator(state: AgentState) -> dict:
     result: OrchestratorOutput = _invoke_structured(model, OrchestratorOutput, [
         SystemMessage(content=_sys_prompt),
         HumanMessage(content=_human),
-    ])
+    ], agent_name="orchestrator")
 
     # Two-pass: if sub-skills requested, load them and re-invoke once
     if result.skill_requests:
@@ -275,7 +281,7 @@ def orchestrator(state: AgentState) -> dict:
             result = _invoke_structured(model, OrchestratorOutput, [
                 SystemMessage(content=_enriched),
                 HumanMessage(content=_human),
-            ])
+            ], agent_name="orchestrator")
 
     # Hard overrides: lock routing at deterministic transition points
     if state.get("current_step") == "installer_requirements_pending_approval":
@@ -362,7 +368,7 @@ def planner(state: AgentState) -> dict:
         result: PlannerOutput = _invoke_structured(model, PlannerOutput, [
             SystemMessage(content=_sys_prompt),
             HumanMessage(content=_human),
-        ])
+        ], agent_name="planner")
 
         # Two-pass: if sub-skills requested, load them and re-invoke once
         if result.skill_requests:
@@ -372,7 +378,7 @@ def planner(state: AgentState) -> dict:
                 result = _invoke_structured(model, PlannerOutput, [
                     SystemMessage(content=_enriched),
                     HumanMessage(content=_human),
-                ])
+                ], agent_name="planner")
 
         console.print(f"[dim cyan][planner] produced {len(result.tasks)} tasks[/dim cyan]")
 
