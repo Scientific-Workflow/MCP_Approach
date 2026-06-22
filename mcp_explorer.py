@@ -75,6 +75,20 @@ def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
         return asyncio.run(_call())
 
 
+# __ Skill file helpers ________________________________________________________
+
+_SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
+
+
+def _read_skill(rel_path: str) -> str:
+    """Read skills/<rel_path>.SKILL.md -- returns '' if not found."""
+    full = os.path.join(_SKILLS_ROOT, rel_path + ".SKILL.md")
+    if os.path.isfile(full):
+        with open(full) as f:
+            return f.read()
+    return ""
+
+
 @tool
 def submit_task(name: str, python_code: str, depends_on: list[str] | None = None, timeout: int = 1800) -> str:
     """Submit a Python task for execution via the workflow engine.
@@ -184,27 +198,71 @@ def read_file(path: str, max_lines: int = 100) -> str:
     return _call_mcp_tool("read_file", {"path": path, "max_lines": max_lines})
 
 
+@tool
+def get_resources() -> str:
+    """Detect available compute resources (nodes, ranks, launcher) for this run.
+
+    Always call this FIRST, before writing any MPI command and before deciding
+    whether you're on a single local machine or inside a multi-node HPC allocation.
+
+    Returns JSON with in_pbs, nnodes, ntasks, cpus_per_task, nodelist, launcher.
+    If in_pbs is false, call load_skill("local"). If in_pbs is true, call
+    load_skill("hpc") to learn the launcher conventions and storage paths.
+    """
+    return _call_mcp_tool("get_resources", {})
+
+
+@tool
+def submit_mpi_task(name: str, command: str, num_ranks: int = 0,
+                     work_dir: str = "/app/work/run0", timeout: int = 1800) -> str:
+    """Submit a command to run in parallel under MPI (mpirun/srun).
+
+    Only use this after get_resources confirms in_pbs=true. Prepends the detected
+    MPI launcher to the given command.
+
+    Args:
+        name: Descriptive name for this task
+        command: The executable and its arguments, without the launcher prefix
+                 (e.g. "lmp -in /app/work/run0/in.watbox")
+        num_ranks: Number of MPI ranks. 0 (default) uses all ranks from get_resources.
+        work_dir: Working directory (default: /app/work/run0)
+        timeout: Max seconds to wait (default: 1800)
+    """
+    return _call_mcp_tool("submit_mpi_task", {
+        "name": name, "command": command, "num_ranks": num_ranks,
+        "work_dir": work_dir, "timeout": timeout,
+    })
+
+
+_KNOWLEDGE_SKILLS = {
+    "local": "knowledge/local",
+    "hpc":   "knowledge/lcrc",
+}
+
+
+@tool
+def load_skill(name: str) -> str:
+    """Load runtime-environment knowledge into your context: "local" or "hpc".
+
+    Call this only after get_resources tells you which environment you're actually
+    in -- do not load both. "local" covers single-machine constraints (no MPI,
+    no PBS). "hpc" covers PBS/mpirun conventions and LCRC storage paths.
+
+    Args:
+        name: "local" or "hpc"
+    """
+    content = _read_skill(_KNOWLEDGE_SKILLS.get(name, ""))
+    return content or f"Unknown skill '{name}'. Use 'local' or 'hpc'."
+
+
 # All tools available to the explorer
 EXPLORER_TOOLS = [
     submit_task, submit_shell_task,
     get_task_status, get_task_result, list_tasks,
     install_package, check_package,
     list_files, read_file,
+    get_resources, submit_mpi_task, load_skill,
 ]
-
-
-# __ Skill file helpers ________________________________________________________
-
-_SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
-
-
-def _read_skill(rel_path: str) -> str:
-    """Read skills/<rel_path>.SKILL.md -- returns '' if not found."""
-    full = os.path.join(_SKILLS_ROOT, rel_path + ".SKILL.md")
-    if os.path.isfile(full):
-        with open(full) as f:
-            return f.read()
-    return ""
 
 
 # __ Explorer System Prompt ____________________________________________________
@@ -226,8 +284,11 @@ adapting your approach when things fail.
 
 | Tool | When to use |
 |---|---|
+| get_resources | **Call first.** Detects nodes/ranks/launcher (in_pbs true/false) |
+| load_skill | Load "local" or "hpc" environment knowledge -- pick ONE based on get_resources |
 | submit_task | Execute Python code (LAMMPS, OVITO, plotting, data processing) |
 | submit_shell_task | Run shell commands (cp, mkdir, ls, file operations) |
+| submit_mpi_task | Run an MPI-capable command (only if get_resources says in_pbs=true) |
 | get_task_status | Check if a previously submitted task is done |
 | get_task_result | Get full stdout/stderr from a completed task |
 | list_tasks | See all tasks and their statuses |
@@ -238,13 +299,17 @@ adapting your approach when things fail.
 
 ## Workflow
 
-1. Review the tasks list and plan your execution order
-2. Before running a task, check prerequisites (files exist, packages installed)
-3. Use submit_shell_task for file operations (copy, mkdir)
-4. Use submit_task for Python code (scientific computation, analysis, plotting)
-5. After each task, verify output (list_files, read_file)
-6. If a task fails, diagnose and fix (install package, change code, retry)
-7. Track task IDs -- use depends_on when tasks have dependencies
+1. Call get_resources first. Then call load_skill("hpc") if in_pbs is true, or
+   load_skill("local") if it is false -- load only the one that matches.
+2. Review the tasks list and plan your execution order
+3. Before running a task, check prerequisites (files exist, packages installed)
+4. Use submit_shell_task for file operations (copy, mkdir)
+5. Use submit_task for Python code (scientific computation, analysis, plotting)
+6. Use submit_mpi_task instead of submit_task/submit_shell_task for MPI-capable
+   executables, but only once get_resources has confirmed in_pbs=true
+7. After each task, verify output (list_files, read_file)
+8. If a task fails, diagnose and fix (install package, change code, retry)
+9. Track task IDs -- use depends_on when tasks have dependencies
 
 ## Rules
 
