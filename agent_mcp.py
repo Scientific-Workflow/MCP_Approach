@@ -43,11 +43,11 @@ load_dotenv()
 
 console = Console()
 
-_run_log_path: str = ""
+_run_log_path: str = "" # path for logging run-level events in JSONL format; only in orchestrator to record routing decisions
 
 
 # __ LLM ______________________________________________________________________
-model = ChatOpenAI(model=os.getenv("MODEL_NAME", "claudeopus48"))
+model = ChatOpenAI(model=os.getenv("MODEL_NAME", "claudesonnet46"))
 
 
 # __ Agent State _______________________________________________________________
@@ -61,9 +61,8 @@ class AgentState(TypedDict):
     tasks:                 list[str]
     exploration_log:       list[dict]       # explorer output (tool call records)
     selected_data_files:   list[str]        # filenames chosen from data/ at startup
-    requirements:          str
+    requirements_content:  str
     requirements_approved: bool
-    image_tag:             str
     image_path:            str              # path to user-uploaded image for planning (optional)
     current_step:          str
     orchestrator_feedback: str
@@ -79,10 +78,10 @@ class AgentState(TypedDict):
 
 class OrchestratorOutput(BaseModel):
     reasoning:           str
-    next:                Literal["planner", "installer", "explorer", "end"]
-    feedback:            str
+    next:                  Literal["planner", "installer", "explorer", "end"]
+    feedback:              str
     requirements_approved: bool = False
-    skill_requests:      list[str] = []
+    skill_requests:        list[str] = []
 
 class PlannerOutput(BaseModel):
     literature_findings: list[str]
@@ -103,7 +102,7 @@ Return ONLY a valid JSON object with exactly these keys:
 - reasoning:           str -- your analysis of the current state
 - next:                "planner" | "installer" | "explorer" | "end"
 - feedback:            str -- specific actionable feedback for the receiving agent, or "" if proceeding normally
-- requirements_approved: bool -- true ONLY when approving a pending requirements.txt, false in all other cases
+- requirements_approved: bool -- true ONLY when approving pending requirements.txt, false in all other cases
 - skill_requests:      list[str] -- skill paths to load (first call only; empty on subsequent calls)
 \
 """
@@ -113,7 +112,7 @@ Your agent skill file contains your full operating instructions. Follow them.
 
 Return ONLY a valid JSON object with exactly these keys:
 - literature_findings: list[str] -- specific, quantitative facts extracted from the paper
-- stack_decision:      list[str] -- packages to install into the venv
+- stack_decision:      list[str] -- packages to install into the local venv
 - tasks:               list[str] -- ordered, Python-API-level implementation steps
 - skill_requests:      list[str] -- skill paths to load (first call only; empty on subsequent calls)
 
@@ -137,6 +136,7 @@ If the input ends with "Orchestrator feedback", fix every issue raised before re
 
 
 # __ Project layout (injected into context) ____________________________________
+######################################################################## Project layout -- this is injected into the system prompt for all agents, so they understand where to read/write files and how the repo maps to runtime paths. Update as needed for your project. ################################################################
 
 PROJECT_LAYOUT = """\
 Repo directory tree -- the repo root is mapped to /app/ at runtime:
@@ -196,6 +196,7 @@ def _invoke_structured(llm, schema, messages, agent_name, retries=5):
 
 
 # __ Skill file helpers ________________________________________________________
+############################################################################# SKILL FILE MANAGEMENT: read .SKILL.md files for orchestrator and planner, with support for sub-skill requests #################################
 
 _SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
 
@@ -242,10 +243,12 @@ def _list_skills(folder: str) -> list:
 
 # __ Nodes _____________________________________________________________________
 
+############################################################################# ORCHESTRATOR ##############################################################
+
 def orchestrator(state: AgentState) -> dict:
     console.print("\n[dim cyan][orchestrator] reviewing state...[/dim cyan]")
-    tracer.log_agent_start("orchestrator")
-    tracer.log_agent_input("orchestrator", {
+    tracer.log_agent_start("orchestrator")         ########### insert TRACER ##########
+    tracer.log_agent_input("orchestrator", {       ########### insert TRACER ##########
         "current_step": state.get("current_step", ""),
         "goal": state.get("goal", ""),
         "has_findings": bool(state.get("literature_findings")),
@@ -271,8 +274,8 @@ def orchestrator(state: AgentState) -> dict:
     if state.get("tasks"):
         parts.append(f"Tasks ({len(state['tasks'])}):\n" +
                      "\n".join(f"  {i+1}. {t}" for i, t in enumerate(state["tasks"])))
-    if state.get("requirements"):
-        parts.append(f"Requirements:\n{state['requirements']}")
+    if state.get("requirements_content"):
+        parts.append(f"requirements.txt:\n{state['requirements_content']}")
     if state.get("exploration_log"):
         # Summarize exploration log for orchestrator
         log = state["exploration_log"]
@@ -334,6 +337,7 @@ def orchestrator(state: AgentState) -> dict:
         panel_body += f"\n\n[bold]Feedback to {result.next}:[/bold]\n[yellow]{result.feedback}[/yellow]"
     console.print(Panel(panel_body, title="[bold cyan]Orchestrator Decision[/bold cyan]", border_style="cyan"))
 
+    # Only wriiten in orchestrator, planner/installer don't use it 
     if _run_log_path:
         with open(_run_log_path, "a") as _lf:
             _lf.write(json.dumps({
@@ -347,7 +351,7 @@ def orchestrator(state: AgentState) -> dict:
 
     already_ran = {
         "planner":   bool(state.get("literature_findings")),
-        "installer": bool(state.get("requirements")),
+        "installer": bool(state.get("requirements_content")),
         "explorer":  bool(state.get("exploration_log")),
     }
     revision_update = {}
@@ -360,37 +364,33 @@ def orchestrator(state: AgentState) -> dict:
     state_update = {
         "next":                  result.next,
         "orchestrator_feedback": result.feedback,
-        "requirements_approved":  result.requirements_approved,
+        "requirements_approved": result.requirements_approved,
         "current_step":          f"orchestrator_routed_to_{result.next}",
         **revision_update,
     }
 
-    tracer.log_routing("orchestrator", result.next, result.reasoning, result.feedback,
+    tracer.log_routing("orchestrator", result.next, result.reasoning, result.feedback,                   ############# insert TRACER #############
                         payload_size=len(json.dumps(state_update, default=str)))
-    tracer.log_agent_output("orchestrator", {"next": result.next, "feedback": result.feedback})
-    tracer.log_agent_end("orchestrator")
+    tracer.log_agent_output("orchestrator", {"next": result.next, "feedback": result.feedback})          ############# insert TRACER #############
+    tracer.log_agent_end("orchestrator")                                                                 ############# TRACER ENDS   #############
 
     return state_update
 
 
+################################################################################## PLANNER ####################################################################################
 def planner(state: AgentState) -> dict:
     try:
         console.print("\n[dim cyan][planner] reading PDF...[/dim cyan]")
         tracer.log_agent_start("planner")
         tracer.log_agent_input("planner", {"pdf_path": state["pdf_path"], "goal": state["goal"]})
 
+        reader = PdfReader(state["pdf_path"])
+        pdf_text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
+        console.print(f"[dim cyan][planner] loaded {len(reader.pages)} pages[/dim cyan]")
+
         feedback = state.get("orchestrator_feedback", "")
         feedback_section = (f"\n\nOrchestrator feedback -- address these issues before returning:\n{feedback}"
                             if feedback else "")
-
-        if state.get("pdf_path"):
-            reader = PdfReader(state["pdf_path"])
-            pdf_text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
-            console.print(f"[dim cyan][planner] loaded {len(reader.pages)} pages[/dim cyan]")
-            paper_section = f"\n\nPaper:\n{pdf_text}"
-        else:
-            console.print("\n[dim cyan][planner] no PDF -- planning from goal only[/dim cyan]")
-            paper_section = ""
 
         # Build system prompt: base skill + env knowledge + available skill index + core prompt
         _base = _read_skill("agents/planner", "planner")
@@ -405,9 +405,9 @@ def planner(state: AgentState) -> dict:
         _data_files = state.get("selected_data_files", [])
         _data_section = (f"\n\nAvailable input data files (in /app/data/):\n" +
                          "\n".join(f"  - {f}" for f in _data_files)) if _data_files else ""
-        _human = f"Goal: {state['goal']}{_data_section}{paper_section}{feedback_section}"
+        _human = f"Goal: {state['goal']}{_data_section}\n\nPaper:\n{pdf_text}{feedback_section}"
 
-        # Build human message — multimodal if an image was provided
+        # Build human message -- multimodal if an image was provided
         if state.get("image_path"):
             console.print("\n[dim cyan][planner] loading image...[/dim cyan]")
             with open(state["image_path"], "rb") as _f:
@@ -469,6 +469,7 @@ def planner(state: AgentState) -> dict:
         console.print(f"[red][planner] ERROR: {e}[/red]")
         raise
 
+################################################################################################### INSTALLER ##############################################################
 
 def installer(state: AgentState) -> dict:
     import sys
@@ -487,7 +488,7 @@ def installer(state: AgentState) -> dict:
                 console.print("[dim cyan][installer] no packages to install[/dim cyan]")
                 tracer.log_agent_output("installer", {"status": "no packages"})
                 tracer.log_agent_end("installer")
-                return {"image_tag": "", "current_step": "installer_complete"}
+                return {"current_step": "installer_complete"}
 
             console.print(f"[dim cyan][installer] pip installing {len(packages)} packages...[/dim cyan]")
             proc = subprocess.run(
@@ -501,36 +502,31 @@ def installer(state: AgentState) -> dict:
 
             tracer.log_agent_output("installer", {"status": "packages installed", "count": len(packages)})
             tracer.log_agent_end("installer")
-            return {"image_tag": "", "current_step": "installer_complete"}
+            return {"current_step": "installer_complete"}
 
         else:
             # __ Phase 1: read or generate requirements.txt, send to orchestrator for approval __
-            if os.path.isfile(requirements_path):
+            feedback = state.get("orchestrator_feedback", "")
+            stack = state.get("stack_decision", [])
+
+            # If orchestrator rejected the previous requirements, regenerate from stack_decision
+            # instead of reading the stale file from disk.
+            if feedback and stack:
+                console.print("[dim cyan][installer] orchestrator rejected previous requirements -- regenerating from stack_decision...[/dim cyan]")
+                content = "\n".join(pkg for pkg in stack if pkg) + "\n"
+                with open(requirements_path, "w") as f:
+                    f.write(content)
+                console.print(f"[dim cyan][installer] regenerated requirements.txt with {len(stack)} packages[/dim cyan]")
+            elif os.path.isfile(requirements_path):
                 console.print("[dim cyan][installer] reading existing requirements.txt...[/dim cyan]")
                 with open(requirements_path) as f:
                     content = f.read()
             else:
                 console.print("[dim cyan][installer] generating requirements.txt from stack_decision...[/dim cyan]")
-                stack = state.get("stack_decision", [])
                 content = "\n".join(pkg for pkg in stack if pkg) + "\n"
                 with open(requirements_path, "w") as f:
                     f.write(content)
                 console.print(f"[dim cyan][installer] generated requirements.txt with {len(stack)} packages[/dim cyan]")
-
-            # Apply orchestrator rejection feedback: strip any packages explicitly flagged for removal.
-            import re as _re
-            feedback = state.get("orchestrator_feedback", "")
-            if feedback:
-                to_remove = {p.lower() for p in _re.findall(r"[Rr]emove\s+'([^']+)'", feedback)}
-                if to_remove:
-                    filtered = [
-                        ln for ln in content.splitlines()
-                        if ln.strip() and ln.strip().split(">=")[0].split("==")[0].lower() not in to_remove
-                    ]
-                    content = "\n".join(filtered) + "\n"
-                    with open(requirements_path, "w") as f:
-                        f.write(content)
-                    console.print(f"[dim cyan][installer] removed {to_remove} per orchestrator feedback[/dim cyan]")
 
             console.print(Panel(
                 content,
@@ -542,16 +538,16 @@ def installer(state: AgentState) -> dict:
             tracer.log_agent_output("installer", {"status": "pending approval", "packages": content.strip()})
             tracer.log_agent_end("installer")
             return {
-                "requirements": content,
-                "current_step": "installer_requirements_pending_approval",
+                "requirements_content": content,
+                "current_step":         "installer_requirements_pending_approval",
             }
 
     except Exception as e:
         console.print(f"[red][installer] ERROR: {e}[/red]")
         raise
 
-
 # __ Graph _____________________________________________________________________
+####################################################################################### LangGraph Nodes #######################################################################################################
 
 def route_orchestrator(state: AgentState) -> str:
     return state["next"]
@@ -581,17 +577,17 @@ app = graph.compile()
 
 
 # __ Run _______________________________________________________________________
+######################################################################### Console Terminal CLI DISPLAY AND RUN LOGGING ################################################################
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="MAW -- Multi-Agent Workflow (MCP Approach)")
     parser.add_argument("--paper", type=str, help="Path to the PDF paper or paper index (1-based)")
-    parser.add_argument("--skip-paper", action="store_true", help="Skip paper selection and plan from goal text only")
     parser.add_argument("--image", type=str, help="Path to image file (diagram/figure) to use for planning")
     parser.add_argument("--goal", type=str, help="Goal for the workflow")
     parser.add_argument("--engine", type=str, default="parsl",
-                        choices=["parsl", "pycompss"],
+                        choices=["parsl", "pycompss", "adios"],
                         help="Workflow engine to use (default: parsl)")
     parser.add_argument("--env", type=str, default="local",
                         choices=["local", "hpc"],
@@ -610,44 +606,34 @@ if __name__ == "__main__":
     lit_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Literature")
     os.makedirs(lit_dir, exist_ok=True)
 
-    if args.skip_paper:
-        pdf_path = ""
-        console.print("[dim]Paper selection skipped -- planner will use goal text only.[/dim]")
+    pdfs = [f for f in os.listdir(lit_dir) if f.lower().endswith(".pdf")]
+    if not pdfs:
+        console.print("[red]No PDFs found in the Literature/ folder. Add a paper and try again.[/red]")
+        raise SystemExit(1)
+
+    console.print("\n[bold]Available papers:[/bold]")
+    for i, name in enumerate(pdfs, 1):
+        console.print(f"  {i}. {name}")
+
+    # Handle paper selection
+    if args.paper:
+        choice = args.paper
+        try:
+            pdf_path = os.path.join(lit_dir, pdfs[int(choice) - 1])
+        except (ValueError, IndexError):
+            pdf_path = os.path.join(lit_dir, choice)
+            if not os.path.isfile(pdf_path):
+                console.print(f"[red]Paper not found: {choice}[/red]")
+                raise SystemExit(1)
     else:
-        pdfs = [f for f in os.listdir(lit_dir) if f.lower().endswith(".pdf")]
+        choice = input("\nSelect a paper by number: ").strip()
+        try:
+            pdf_path = os.path.join(lit_dir, pdfs[int(choice) - 1])
+        except (ValueError, IndexError):
+            console.print("[red]Invalid selection.[/red]")
+            raise SystemExit(1)
 
-        if not pdfs:
-            console.print("[yellow]No PDFs found in Literature/. Proceeding without a paper (goal-only mode).[/yellow]")
-            pdf_path = ""
-        else:
-            console.print("\n[bold]Available papers:[/bold]")
-            for i, name in enumerate(pdfs, 1):
-                console.print(f"  {i}. {name}")
-            console.print(f"  0. Skip -- use goal text only")
-
-            if args.paper:
-                choice = args.paper
-                try:
-                    pdf_path = os.path.join(lit_dir, pdfs[int(choice) - 1])
-                except (ValueError, IndexError):
-                    pdf_path = os.path.join(lit_dir, choice)
-                    if not os.path.isfile(pdf_path):
-                        console.print(f"[red]Paper not found: {choice}[/red]")
-                        raise SystemExit(1)
-            else:
-                choice = input("\nSelect a paper by number (or 0 to skip): ").strip()
-                if choice == "0":
-                    pdf_path = ""
-                    console.print("[dim]Paper selection skipped -- planner will use goal text only.[/dim]")
-                else:
-                    try:
-                        pdf_path = os.path.join(lit_dir, pdfs[int(choice) - 1])
-                    except (ValueError, IndexError):
-                        console.print("[red]Invalid selection.[/red]")
-                        raise SystemExit(1)
-
-        if pdf_path:
-            console.print(f"[dim]Selected: {os.path.basename(pdf_path)}[/dim]")
+    console.print(f"[dim]Selected: {os.path.basename(pdf_path)}[/dim]")
 
     # Handle image selection
     _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -738,9 +724,8 @@ if __name__ == "__main__":
         "tasks":                 [],
         "exploration_log":       [],
         "selected_data_files":   selected_data_files,
-        "requirements":          "",
+        "requirements_content":  "",
         "requirements_approved": False,
-        "image_tag":             "",
         "image_path":            image_path,
         "current_step":          "start",
         "orchestrator_feedback": "",
@@ -754,7 +739,7 @@ if __name__ == "__main__":
 
     trace_path = os.path.join(runs_dir, _run_id + "_trace.json")
 
-    tracer.reset()
+    tracer.reset()   # brefor you run it, reset the tracer to clear any previous runs from the dashboard
     tracer.start_run(
         run_id=_run_id,
         condition=args.condition,
@@ -769,7 +754,7 @@ if __name__ == "__main__":
     )
 
     try:
-        app.invoke(initial_state)
+        app.invoke(initial_state) # write the node functions to log to the tracer, and then invoke the graph with the initial state
         tracer.finalize_run("completed")
     except Exception as e:
         import traceback as _traceback
@@ -781,7 +766,7 @@ if __name__ == "__main__":
         raise
 
     # Save trace
-    tracer.save(trace_path)
+    tracer.save(trace_path)  #save the trace to a file for later analysis
     console.print(f"[dim]Trace saved: {trace_path}[/dim]")
 
     # Print interaction summary
@@ -791,3 +776,19 @@ if __name__ == "__main__":
     console.print(f"  Routing path: {' -> '.join(summary['routing_path'])}")
     console.print(f"  Tool calls: {summary['tool_calls']} ({summary['tool_successes']} succeeded)")
     console.print(f"  Total time: {summary['total_duration_s']}s")
+
+################################################################### TOKEN USAGE SUMMARY (CHECK runs folder: xxxxxxxx_trace.json) ##################################################################)
+    # Print token usage
+    total_in = summary.get('total_input_tokens', 0)
+    total_out = summary.get('total_output_tokens', 0)
+    if total_in or total_out:
+        console.print(f"\n[bold]Token Usage:[/bold]")
+        console.print(f"  Input tokens:  {total_in:,}")
+        console.print(f"  Output tokens: {total_out:,}")
+        console.print(f"  Total tokens:  {total_in + total_out:,}")
+        tokens_by_agent = summary.get('tokens_by_agent', {})
+        if tokens_by_agent:
+            console.print(f"  By agent:")
+            for agent, count in sorted(tokens_by_agent.items()):
+                console.print(f"    {agent}: {count:,}")
+

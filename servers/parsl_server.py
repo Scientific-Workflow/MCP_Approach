@@ -5,7 +5,10 @@ An MCP server that exposes Parsl workflow engine capabilities as tools.
 The explorer agent connects to this server via MCP protocol to submit tasks,
 check status, get results, and manage the workflow execution.
 
-This server executes tasks locally (or in a virtual environment) using subprocess.
+Task execution is routed through a real Parsl DataFlowKernel when Parsl is
+installed: each command runs as a Parsl @python_app (HighThroughputExecutor +
+LocalProvider). If Parsl is not installed, the server falls back to direct
+subprocess execution -- identical results, just without Parsl scheduling.
 Compatible with HPC environments and local development.
 
 The VENV_PYTHON environment variable controls which Python interpreter to use.
@@ -27,6 +30,16 @@ import tempfile
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
+# Parsl is optional. When installed, task execution is routed through a real
+# Parsl DataFlowKernel (@python_app scheduling). When absent, the server falls
+# back to direct subprocess execution -- identical results, no Parsl scheduling.
+try:
+    import parsl
+    from parsl import python_app
+    _PARSL_AVAILABLE = True
+except Exception:
+    _PARSL_AVAILABLE = False
+
 # __ Server Setup ______________________________________________________________
 
 mcp = FastMCP(
@@ -47,6 +60,14 @@ REPO_ROOT = os.environ.get(
 # e.g. VENV_PYTHON=/path/to/venv/bin/python
 # If not set, uses the same Python as the server.
 VENV_PYTHON = os.environ.get("VENV_PYTHON", sys.executable)
+
+# Parsl's HighThroughputExecutor launches its interchange subprocess by bare name
+# ("interchange.py"), resolved via PATH -- not via VENV_PYTHON's directory. Without
+# this, parsl.load() fails with FileNotFoundError and _ensure_parsl() silently falls
+# back to plain subprocess execution (no real Parsl scheduling, no error surfaced).
+_venv_bin = os.path.dirname(VENV_PYTHON)
+if _venv_bin and _venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
+    os.environ["PATH"] = _venv_bin + os.pathsep + os.environ.get("PATH", "")
 
 # Default working directory for tasks
 DEFAULT_WORK_DIR = os.path.join(REPO_ROOT, "work", "run0")
@@ -87,6 +108,108 @@ TASK_ENV = {
     "I_MPI_HYDRA_BOOTSTRAP": "fork",
     "FI_PROVIDER": "tcp",
 }
+
+# __ Parsl Integration _________________________________________________________
+# A single long-lived DataFlowKernel schedules every task as a real @python_app.
+# This is what makes the "Parsl" engine name accurate: tasks become AppFutures
+# scheduled by Parsl, not bare subprocess calls.
+
+_PARSL_LOADED = False
+
+
+def _build_parsl_config():
+    """Build a Parsl Config sized to the actual allocation (PBS_NODEFILE/PBS_NUM_PPN).
+
+    We are always launched *inside* an already-granted PBS allocation (the explorer
+    skill requires `qsub -I` before starting the agent) -- so we never submit a new
+    job via PBSProProvider. Instead we stay on LocalProvider (use what we already
+    have) but size and launch it correctly:
+
+    - Outside PBS (local dev): 1 node, 1 worker, SingleNodeLauncher.
+    - Inside PBS, single node: 1 node, one worker per allocated core
+      (cpus_per_task from PBS_NUM_PPN/PBS_NODEFILE), SingleNodeLauncher.
+    - Inside PBS, multiple nodes: nodes_per_block = nnodes, MpiRunLauncher spreads
+      the worker pool across every host in PBS_NODEFILE via mpirun, with workers
+      per node again sized to cpus_per_task. address_by_hostname() is required here
+      so workers on other hosts can reach the interchange (loopback only works
+      for the launching node).
+    """
+    from parsl.config import Config
+    from parsl.executors import HighThroughputExecutor
+    from parsl.providers import LocalProvider
+    from parsl.launchers import SingleNodeLauncher, MpiRunLauncher
+    from parsl.addresses import address_by_hostname
+
+    res = _detect_resources()
+    nnodes = max(res["nnodes"], 1) if res["in_pbs"] else 1
+    workers_per_node = max(res["cpus_per_task"], 1) if res["in_pbs"] else 1
+    multi_node = res["in_pbs"] and nnodes > 1
+
+    executor_kwargs = dict(
+        label="mcp_htex",
+        provider=LocalProvider(
+            nodes_per_block=nnodes,
+            launcher=MpiRunLauncher() if multi_node else SingleNodeLauncher(),
+            init_blocks=1,
+            min_blocks=1,
+            max_blocks=1,
+        ),
+        max_workers_per_node=workers_per_node,
+    )
+    if multi_node:
+        executor_kwargs["address"] = address_by_hostname()
+
+    return Config(
+        executors=[HighThroughputExecutor(**executor_kwargs)],
+        run_dir=os.path.join(DEFAULT_WORK_DIR, ".parsl"),  # keep Parsl logs out of repo root
+    )
+
+
+def _ensure_parsl() -> bool:
+    """Lazily start the Parsl DFK once. Returns True if Parsl is active."""
+    global _PARSL_LOADED, _PARSL_AVAILABLE
+    if not _PARSL_AVAILABLE:
+        return False
+    if _PARSL_LOADED:
+        return True
+    try:
+        parsl.load(_build_parsl_config())
+        _PARSL_LOADED = True
+        print("[parsl_server] Parsl DataFlowKernel loaded -- tasks run as @python_app",
+              file=sys.stderr)
+        return True
+    except Exception as e:
+        _PARSL_AVAILABLE = False  # give up on Parsl for this process; use fallback
+        print(f"[parsl_server] Parsl load failed ({e}); using direct subprocess",
+              file=sys.stderr)
+        return False
+
+
+if _PARSL_AVAILABLE:
+    @python_app
+    def _exec_command_app(cmd, work_dir, timeout, env):
+        """Real Parsl app: runs one command on a Parsl worker, returns a result dict.
+
+        Self-contained (imports + env passed explicitly) so it serializes cleanly
+        to HighThroughputExecutor workers.
+        """
+        import os, subprocess
+        os.makedirs(work_dir, exist_ok=True)
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True,
+                cwd=work_dir, env=env, timeout=timeout,
+            )
+            return {
+                "exit_code": proc.returncode,
+                "stdout": proc.stdout.strip(),
+                "stderr": proc.stderr.strip(),
+            }
+        except subprocess.TimeoutExpired:
+            return {"exit_code": -1, "stdout": "", "stderr": f"Command timed out after {timeout}s"}
+        except Exception as e:
+            return {"exit_code": -1, "stdout": "", "stderr": str(e)}
+
 
 # __ Resource Detection ________________________________________________________
 
@@ -159,8 +282,8 @@ _tasks: dict[str, dict] = {}
 
 # __ Execution Helpers _________________________________________________________
 
-def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
-    """Execute a command locally (or in venv) and return results."""
+def _run_command_local(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
+    """Execute a command directly via subprocess (the Parsl-fallback path)."""
     os.makedirs(work_dir, exist_ok=True)
 
     try:
@@ -188,6 +311,24 @@ def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int 
             "stdout": "",
             "stderr": str(e),
         }
+
+
+def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
+    """Execute a command. Routes through the Parsl DFK (as an @python_app) when
+    Parsl is available; otherwise runs it directly via subprocess.
+
+    Every MCP tool funnels through here, so this single chokepoint makes the whole
+    server genuinely Parsl-driven. We block on .result() to keep each MCP tool call
+    synchronous (true async/DAG submission is a separate, larger change).
+    """
+    if _ensure_parsl():
+        try:
+            return _exec_command_app(cmd, work_dir, timeout, dict(TASK_ENV)).result()
+        except Exception as e:
+            # Parsl execution failed -- fall back so the workflow still completes.
+            print(f"[parsl_server] Parsl exec failed ({e}); using direct subprocess",
+                  file=sys.stderr)
+    return _run_command_local(cmd, work_dir, timeout)
 
 
 def _run_python_script(script: str, work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
@@ -277,7 +418,6 @@ import sys, os, traceback
 # Ensure working directory exists
 os.makedirs("{DEFAULT_WORK_DIR}", exist_ok=True)
 os.chdir("{DEFAULT_WORK_DIR}")
-
 try:
     # --- User task code ---
 {_indent(resolved_code, 4)}
@@ -736,11 +876,23 @@ lmp.close()
 
 @mcp.tool()
 def cleanup() -> str:
-    """Clean up resources. For local execution, this just clears the task registry."""
-    global _tasks
+    """Clean up resources: clears the task registry and shuts down the Parsl DFK."""
+    global _tasks, _PARSL_LOADED
     count = len(_tasks)
     _tasks = {}
-    return json.dumps({"status": "cleaned up", "tasks_cleared": count})
+    parsl_cleaned = False
+    if _PARSL_LOADED:
+        try:
+            parsl.dfk().cleanup()
+            parsl_cleaned = True
+        except Exception:
+            pass
+        _PARSL_LOADED = False  # allow a fresh DFK if more tasks arrive
+    return json.dumps({
+        "status": "cleaned up",
+        "tasks_cleared": count,
+        "parsl_dfk_shutdown": parsl_cleaned,
+    })
 
 
 # __ Helpers ___________________________________________________________________

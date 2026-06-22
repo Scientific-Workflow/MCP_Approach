@@ -203,6 +203,21 @@ class TraceLogger:
                                        elapsed_s=self._elapsed(), timestamp=self._now())
         self.events.append(event.model_dump())
 
+    def log_token_usage(self, agent_name: str, input_tokens: int, output_tokens: int,
+                         total_tokens: int = 0, model: str = ""):
+        """Record token consumption for a single LLM call made by an agent."""
+        if not total_tokens:
+            total_tokens = input_tokens + output_tokens
+        self.events.append({
+            "type": "token_usage",
+            "agent": agent_name,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "model": model,
+            "elapsed_s": self._elapsed(),
+        })
+
     def log_message(self, from_agent: str, to_agent: str, message: str):
         """Record a message passed between agents via state."""
         event = MessageEvent.model_validate({
@@ -305,6 +320,32 @@ class TraceLogger:
         self.start_time = time.time()
         self._agent_starts = {}
         self.run_metadata = None
+
+
+def extract_usage(response: Any) -> Optional[dict]:
+    """Pull token counts out of a LangChain chat response.
+
+    Returns {"input_tokens", "output_tokens", "total_tokens"} or None if the
+    response carries no usage info.
+    """
+    # Preferred: AIMessage.usage_metadata (provider-agnostic, normalized keys)
+    usage = getattr(response, "usage_metadata", None)
+    if usage:
+        return {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        }
+    # Fallback: response_metadata["token_usage"] (OpenAI-style keys)
+    meta = getattr(response, "response_metadata", None) or {}
+    tu = meta.get("token_usage") or meta.get("usage")
+    if tu:
+        return {
+            "input_tokens": tu.get("prompt_tokens", 0),
+            "output_tokens": tu.get("completion_tokens", 0),
+            "total_tokens": tu.get("total_tokens", 0),
+        }
+    return None
 
 
 # Global tracer instance
