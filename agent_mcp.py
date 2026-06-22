@@ -18,7 +18,9 @@ import base64
 import json
 import mimetypes
 import operator
+import re
 import subprocess
+import time
 import warnings
 from datetime import datetime
 from typing import Annotated, Literal, Sequence
@@ -35,7 +37,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
 from mcp_explorer import explorer
-from trace_logger import tracer
+from trace_logger import tracer, extract_usage, message_to_dict
 
 load_dotenv()
 
@@ -163,13 +165,23 @@ HOST_REPO_PATH = os.environ.get("HOST_REPO_PATH", os.path.dirname(os.path.abspat
 
 # __ Structured output helper __________________________________________________
 
-def _invoke_structured(llm, schema, messages, retries=5):
+def _invoke_structured(llm, schema, messages, agent_name, retries=5):
     """Call llm and parse the response as schema, tolerating preamble text before the JSON block."""
     import json as _json, re as _re
     last_err = None
+    model_name = getattr(llm, "model_name", None) or os.getenv("MODEL_NAME", "")
+    msg_dicts = [message_to_dict(m) for m in messages]
     for attempt in range(retries):
+        _t0 = time.time()
         response = llm.invoke(messages)
+        latency_s = round(time.time() - _t0, 2)
         text = response.content if hasattr(response, "content") else str(response)
+        usage = extract_usage(response)
+        tracer.log_llm_call(
+            agent_name, model_name, msg_dicts, text,
+            input_tokens=usage["input_tokens"], output_tokens=usage["output_tokens"],
+            total_tokens=usage["total_tokens"], latency_s=latency_s, attempt=attempt + 1,
+        )
         match = _re.search(r'\{.*\}', text, _re.DOTALL)
         if not match:
             last_err = ValueError(f"No JSON object found in model response:\n{text[:500]}")
@@ -187,10 +199,12 @@ def _invoke_structured(llm, schema, messages, retries=5):
 
 _SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
 
-def _read_skill(rel_path: str) -> str:
-    """Read skills/<rel_path>.SKILL.md -- returns '' if not found."""
+def _read_skill(rel_path: str, agent_name: str) -> str:
+    """Read skills/<rel_path>.SKILL.md -- returns '' if not found. Logs the load attempt."""
     full = os.path.join(_SKILLS_ROOT, rel_path + ".SKILL.md")
-    if os.path.isfile(full):
+    found = os.path.isfile(full)
+    tracer.log_skill_load(agent_name, rel_path, found)
+    if found:
         with open(full) as f:
             return f.read()
     return ""
@@ -200,10 +214,17 @@ _ENV_KNOWLEDGE = {
     "hpc":   "knowledge/lcrc",
 }
 
-def _env_knowledge(env: str) -> str:
+def _env_knowledge(env: str, agent_name: str) -> str:
     """Return the environment knowledge skill content for the given env."""
     skill_key = _ENV_KNOWLEDGE.get(env, "knowledge/local")
-    return _read_skill(skill_key)
+    return _read_skill(skill_key, agent_name)
+
+def _slugify(path: str) -> str:
+    """Turn a file path into a stable run-metadata id, e.g. for paper_id."""
+    base = os.path.splitext(os.path.basename(path))[0] if path else "no_paper"
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", base).strip("_")
+    return slug or "no_paper"
+
 
 def _list_skills(folder: str) -> list:
     """List available names in skills/<folder>/: subdirectory names AND .SKILL.md base names."""
@@ -265,8 +286,8 @@ def orchestrator(state: AgentState) -> dict:
             parts.append(f"  [{entry['tool']}] {status_str} - {entry.get('result', '')[:200]}")
 
     # Build system prompt: base skill + env knowledge + available skill index + core prompt
-    _base = _read_skill("agents/orchestrator")
-    _env_kn = _env_knowledge(state.get("env", "local"))
+    _base = _read_skill("agents/orchestrator", "orchestrator")
+    _env_kn = _env_knowledge(state.get("env", "local"), "orchestrator")
     _uc = _list_skills("use_cases")
     _sys = _list_skills("systems")
     _index = (f"\n\nAvailable skill contexts (set in skill_requests to load):"
@@ -279,17 +300,17 @@ def orchestrator(state: AgentState) -> dict:
     result: OrchestratorOutput = _invoke_structured(model, OrchestratorOutput, [
         SystemMessage(content=_sys_prompt),
         HumanMessage(content=_human),
-    ])
+    ], "orchestrator")
 
     # Two-pass: if sub-skills requested, load them and re-invoke once
     if result.skill_requests:
-        _sub = "\n\n".join(filter(None, (_read_skill(r) for r in result.skill_requests)))
+        _sub = "\n\n".join(filter(None, (_read_skill(r, "orchestrator") for r in result.skill_requests)))
         if _sub:
             _enriched = _sys_prompt + f"\n\n=== Loaded Skills ===\n{_sub}\n\n(Final pass -- do not set skill_requests.)"
             result = _invoke_structured(model, OrchestratorOutput, [
                 SystemMessage(content=_enriched),
                 HumanMessage(content=_human),
-            ])
+            ], "orchestrator")
 
     # Hard overrides: lock routing at deterministic transition points
     if state.get("current_step") == "installer_requirements_pending_approval":
@@ -334,18 +355,22 @@ def orchestrator(state: AgentState) -> dict:
         key = f"{result.next}_revisions"
         revision_update[key] = state.get(key, 0) + 1
         console.print(f"[bold yellow][orchestrator] revision #{revision_update[key]} for {result.next}[/bold yellow]")
+        tracer.log_replan(result.next, revision_update[key])
 
-    tracer.log_routing("orchestrator", result.next, result.reasoning, result.feedback)
-    tracer.log_agent_output("orchestrator", {"next": result.next, "feedback": result.feedback})
-    tracer.log_agent_end("orchestrator")
-
-    return {
+    state_update = {
         "next":                  result.next,
         "orchestrator_feedback": result.feedback,
         "requirements_approved":  result.requirements_approved,
         "current_step":          f"orchestrator_routed_to_{result.next}",
         **revision_update,
     }
+
+    tracer.log_routing("orchestrator", result.next, result.reasoning, result.feedback,
+                        payload_size=len(json.dumps(state_update, default=str)))
+    tracer.log_agent_output("orchestrator", {"next": result.next, "feedback": result.feedback})
+    tracer.log_agent_end("orchestrator")
+
+    return state_update
 
 
 def planner(state: AgentState) -> dict:
@@ -368,8 +393,8 @@ def planner(state: AgentState) -> dict:
             paper_section = ""
 
         # Build system prompt: base skill + env knowledge + available skill index + core prompt
-        _base = _read_skill("agents/planner")
-        _env_kn = _env_knowledge(state.get("env", "local"))
+        _base = _read_skill("agents/planner", "planner")
+        _env_kn = _env_knowledge(state.get("env", "local"), "planner")
         _uc = _list_skills("use_cases")
         _sys = _list_skills("systems")
         _index = (f"\n\nAvailable skill contexts (set in skill_requests to load):"
@@ -401,17 +426,17 @@ def planner(state: AgentState) -> dict:
         result: PlannerOutput = _invoke_structured(model, PlannerOutput, [
             SystemMessage(content=_sys_prompt),
             _human_msg,
-        ])
+        ], "planner")
 
         # Two-pass: if sub-skills requested, load them and re-invoke once
         if result.skill_requests:
-            _sub = "\n\n".join(filter(None, (_read_skill(r) for r in result.skill_requests)))
+            _sub = "\n\n".join(filter(None, (_read_skill(r, "planner") for r in result.skill_requests)))
             if _sub:
                 _enriched = _sys_prompt + f"\n\n=== Loaded Skills ===\n{_sub}\n\n(Final pass -- do not set skill_requests.)"
                 result = _invoke_structured(model, PlannerOutput, [
                     SystemMessage(content=_enriched),
                     _human_msg,
-                ])
+                ], "planner")
 
         console.print(f"[dim cyan][planner] produced {len(result.tasks)} tasks[/dim cyan]")
 
@@ -571,6 +596,13 @@ if __name__ == "__main__":
     parser.add_argument("--env", type=str, default="local",
                         choices=["local", "hpc"],
                         help="Execution environment: local (default) or hpc (LCRC/PBS)")
+    parser.add_argument("--condition", type=str, default="B",
+                        choices=["A", "B", "C"],
+                        help="Ablation condition: A=no-skills, B=full (default), C=single-agent")
+    parser.add_argument("--trial", type=int, default=1,
+                        help="Trial number for repeated (paper, condition) runs (default: 1)")
+    parser.add_argument("--domain", type=str, default="",
+                        help="Paper domain label, e.g. molecular_nucleation (optional)")
     args = parser.parse_args()
 
     console.print(Panel(f"[bold blue]MAW -- Multi-Agent Workflow (MCP Approach)[/bold blue]\n[dim]Engine: {args.engine} | Env: {args.env}[/dim]", border_style="blue"))
@@ -693,7 +725,8 @@ if __name__ == "__main__":
 
     runs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs")
     os.makedirs(runs_dir, exist_ok=True)
-    _run_log_path = os.path.join(runs_dir, datetime.now().strftime("%Y%m%d_%H%M%S") + ".jsonl")
+    _run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _run_log_path = os.path.join(runs_dir, _run_id + ".jsonl")
     console.print(f"[dim]Run log: {_run_log_path}[/dim]")
 
     initial_state = {
@@ -719,11 +752,35 @@ if __name__ == "__main__":
         "env":                   args.env,
     }
 
+    trace_path = os.path.join(runs_dir, _run_id + "_trace.json")
+
     tracer.reset()
-    app.invoke(initial_state)
+    tracer.start_run(
+        run_id=_run_id,
+        condition=args.condition,
+        trial=args.trial,
+        paper_id=_slugify(pdf_path) if pdf_path else "no_paper",
+        paper_path=pdf_path,
+        domain=args.domain,
+        framework=args.engine,
+        env=args.env,
+        goal=goal,
+        model=os.getenv("MODEL_NAME", "claudeopus48"),
+    )
+
+    try:
+        app.invoke(initial_state)
+        tracer.finalize_run("completed")
+    except Exception as e:
+        import traceback as _traceback
+        tracer.log_run_error(type(e).__name__, str(e), _traceback.format_exc())
+        tracer.finalize_run("failed")
+        tracer.save(trace_path)
+        console.print(f"[red]Run failed: {e}[/red]")
+        console.print(f"[dim]Trace saved (partial): {trace_path}[/dim]")
+        raise
 
     # Save trace
-    trace_path = os.path.join(runs_dir, datetime.now().strftime("%Y%m%d_%H%M%S") + "_trace.json")
     tracer.save(trace_path)
     console.print(f"[dim]Trace saved: {trace_path}[/dim]")
 

@@ -14,6 +14,7 @@ import os
 import sys
 import json
 import asyncio
+import time
 from typing import Optional
 from contextlib import AsyncExitStack
 
@@ -21,7 +22,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from rich.console import Console
-from trace_logger import tracer
+from trace_logger import tracer, extract_usage, message_to_dict
 from rich.panel import Panel
 
 from mcp import ClientSession, StdioServerParameters
@@ -197,10 +198,12 @@ EXPLORER_TOOLS = [
 _SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
 
 
-def _read_skill(rel_path: str) -> str:
-    """Read skills/<rel_path>.SKILL.md -- returns '' if not found."""
+def _read_skill(rel_path: str, agent_name: str = "explorer") -> str:
+    """Read skills/<rel_path>.SKILL.md -- returns '' if not found. Logs the load attempt."""
     full = os.path.join(_SKILLS_ROOT, rel_path + ".SKILL.md")
-    if os.path.isfile(full):
+    found = os.path.isfile(full)
+    tracer.log_skill_load(agent_name, rel_path, found)
+    if found:
         with open(full) as f:
             return f.read()
     return ""
@@ -391,16 +394,15 @@ async def _explorer_async(state: dict, engine: str) -> dict:
         _uc_dir = os.path.join(_SKILLS_ROOT, "use_cases")
         if os.path.isdir(_uc_dir):
             for uc_name in os.listdir(_uc_dir):
-                uc_skill_path = os.path.join(_uc_dir, uc_name, "explorer.SKILL.md")
-                if os.path.isfile(uc_skill_path):
-                    with open(uc_skill_path) as f:
-                        content = f.read()
-                    # Match if any stack package appears in the skill file description
-                    desc_lower = content[:500].lower()
-                    if any(pkg in desc_lower for pkg in _stack_lower):
-                        _uc_skill = content
-                        console.print(f"[dim cyan][explorer] loaded use case skill: {uc_name}[/dim cyan]")
-                        break
+                content = _read_skill(f"use_cases/{uc_name}/explorer")
+                if not content:
+                    continue
+                # Match if any stack package appears in the skill file description
+                desc_lower = content[:500].lower()
+                if any(pkg in desc_lower for pkg in _stack_lower):
+                    _uc_skill = content
+                    console.print(f"[dim cyan][explorer] loaded use case skill: {uc_name}[/dim cyan]")
+                    break
 
         system_prompt = EXPLORER_SYSTEM_PROMPT
         if _base_skill:
@@ -455,7 +457,20 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                 console.print(f"[dim yellow][explorer] context trimmed to {len(messages)} messages[/dim yellow]")
 
             # Run LLM call in a thread (it's sync/blocking)
+            _t0 = time.time()
             response = await asyncio.to_thread(llm_with_tools.invoke, messages)
+            _latency_s = round(time.time() - _t0, 2)
+            _usage = extract_usage(response)
+            _model_name = getattr(llm, "model_name", None) or os.getenv(
+                "CODER_MODEL_NAME", os.getenv("MODEL_NAME", ""))
+            tracer.log_llm_call(
+                "explorer", _model_name,
+                [message_to_dict(m) for m in messages],
+                response.content if hasattr(response, "content") else str(response),
+                tool_calls=response.tool_calls or [],
+                input_tokens=_usage["input_tokens"], output_tokens=_usage["output_tokens"],
+                total_tokens=_usage["total_tokens"], latency_s=_latency_s, attempt=iteration + 1,
+            )
             messages.append(response)
 
             if not response.tool_calls:
@@ -557,8 +572,14 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                         tool_succeeded = False
                         display_status = "unknown response"
                 except (json.JSONDecodeError, AttributeError):
-                    tool_succeeded = True  # raw text response, not an error
-                    display_status = "done"
+                    if tool_result.lower().startswith(("unknown tool", "error")):
+                        # Plain-text error responses (e.g. a hallucinated tool name) must
+                        # not be marked successful just because they aren't JSON.
+                        tool_succeeded = False
+                        display_status = tool_result[:80]
+                    else:
+                        tool_succeeded = True  # raw text response, not an error
+                        display_status = "done"
 
                 log_entry = {
                     "iteration": iteration + 1,
@@ -572,9 +593,9 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                 color = "green" if tool_succeeded else "red"
                 console.print(f"[{color}][explorer] {tool_name} -> {display_status}[/{color}]")
 
-                # Log to trace
+                # Log to trace (full result, not truncated -- needed for debugging failed runs)
                 tracer.log_tool_call("explorer", tool_name, tool_args,
-                                     tool_result[:300], tool_succeeded)
+                                     tool_result, tool_succeeded, iteration=iteration + 1)
 
                 messages.append(ToolMessage(
                     content=tool_result[:_MAX_TOOL_RESULT_CHARS],
@@ -613,6 +634,21 @@ async def _explorer_async(state: dict, engine: str) -> dict:
             f"{iteration + 1} iterations"
         )
         console.print(f"[dim cyan][explorer] {summary}[/dim cyan]")
+
+        # Record what was actually produced -- supports tier-1/tier-3 scoring
+        # directly from the trace without re-deriving it from tool-call text.
+        work_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "work")
+        artifacts = []
+        if os.path.isdir(work_dir):
+            for dirpath, _, filenames in os.walk(work_dir):
+                for fn in filenames:
+                    full = os.path.join(dirpath, fn)
+                    try:
+                        size_bytes = os.path.getsize(full)
+                    except OSError:
+                        size_bytes = -1
+                    artifacts.append({"path": full, "size_bytes": size_bytes})
+        tracer.log_artifact_manifest(artifacts)
 
         tracer.log_agent_output("explorer", {
             "total_tool_calls": total_calls,
