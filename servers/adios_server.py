@@ -15,7 +15,7 @@ between pipeline stages. When ADIOS2 is NOT available, tasks fall back to
 numpy file I/O (.npy/.npz) — same result, just without ADIOS2 optimizations.
 
 This server executes tasks locally (or in a virtual environment) using subprocess.
-No Docker required. Compatible with HPC environments where ADIOS2 is installed.
+Compatible with HPC environments where ADIOS2 is installed.
 
 The VENV_PYTHON environment variable controls which Python interpreter to use.
 
@@ -464,7 +464,7 @@ def _indent(text: str, spaces: int) -> str:
 
 
 def _resolve_paths(text: str) -> str:
-    """Replace /app/ container paths with actual local repo paths."""
+    """Replace /app/ placeholder paths with actual local repo paths."""
     return text.replace("/app/", REPO_ROOT + "/").replace("//", "/")
 
 

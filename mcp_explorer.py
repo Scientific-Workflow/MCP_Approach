@@ -1,8 +1,8 @@
 """
 MCP Explorer Agent -- ReAct loop that calls workflow engine tools via MCP protocol.
 
-The explorer receives tasks from the planner and an image_tag from the installer,
-then iteratively calls tools (exposed by the MCP server) to complete each task:
+The explorer receives tasks from the planner once the installer has finished
+preparing the local venv, then iteratively calls tools (exposed by the MCP server) to complete each task:
 submitting Python tasks, running shell commands, checking outputs, installing
 missing packages, and recovering from errors.
 

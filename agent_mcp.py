@@ -56,9 +56,8 @@ class AgentState(TypedDict):
     stack_decision:        list[str]
     tasks:                 list[str]
     exploration_log:       list[dict]       # explorer output (tool call records)
-    dockerfile:            str
-    dockerfile_approved:   bool
-    image_tag:             str
+    requirements_content:  str
+    requirements_approved: bool
     current_step:          str
     orchestrator_feedback: str
     next:                  str
@@ -72,10 +71,10 @@ class AgentState(TypedDict):
 
 class OrchestratorOutput(BaseModel):
     reasoning:           str
-    next:                Literal["planner", "installer", "explorer", "end"]
-    feedback:            str
-    dockerfile_approved: bool = False
-    skill_requests:      list[str] = []
+    next:                  Literal["planner", "installer", "explorer", "end"]
+    feedback:              str
+    requirements_approved: bool = False
+    skill_requests:        list[str] = []
 
 class PlannerOutput(BaseModel):
     literature_findings: list[str]
@@ -84,7 +83,7 @@ class PlannerOutput(BaseModel):
     skill_requests:      list[str] = []
 
 class InstallerOutput(BaseModel):
-    dockerfile_content: str
+    requirements_content: str
 
 
 # __ Agent Prompts _____________________________________________________________
@@ -96,7 +95,7 @@ Return ONLY a valid JSON object with exactly these keys:
 - reasoning:           str -- your analysis of the current state
 - next:                "planner" | "installer" | "explorer" | "end"
 - feedback:            str -- specific actionable feedback for the receiving agent, or "" if proceeding normally
-- dockerfile_approved: bool -- true ONLY when approving a pending Dockerfile, false in all other cases
+- requirements_approved: bool -- true ONLY when approving pending requirements.txt, false in all other cases
 - skill_requests:      list[str] -- skill paths to load (first call only; empty on subsequent calls)
 \
 """
@@ -239,8 +238,8 @@ def orchestrator(state: AgentState) -> dict:
     if state.get("tasks"):
         parts.append(f"Tasks ({len(state['tasks'])}):\n" +
                      "\n".join(f"  {i+1}. {t}" for i, t in enumerate(state["tasks"])))
-    if state.get("dockerfile"):
-        parts.append(f"Dockerfile:\n{state['dockerfile']}")
+    if state.get("requirements_content"):
+        parts.append(f"requirements.txt:\n{state['requirements_content']}")
     if state.get("exploration_log"):
         # Summarize exploration log for orchestrator
         log = state["exploration_log"]
@@ -279,7 +278,7 @@ def orchestrator(state: AgentState) -> dict:
             ])
 
     # Hard overrides: lock routing at deterministic transition points
-    if state.get("current_step") == "installer_dockerfile_pending_approval":
+    if state.get("current_step") == "installer_requirements_pending_approval":
         result.next = "installer"
     elif state.get("current_step") == "installer_complete":
         result.next = "explorer"
@@ -314,7 +313,7 @@ def orchestrator(state: AgentState) -> dict:
 
     already_ran = {
         "planner":   bool(state.get("literature_findings")),
-        "installer": bool(state.get("dockerfile")),
+        "installer": bool(state.get("requirements_content")),
         "explorer":  bool(state.get("exploration_log")),
     }
     revision_update = {}
@@ -330,7 +329,7 @@ def orchestrator(state: AgentState) -> dict:
     return {
         "next":                  result.next,
         "orchestrator_feedback": result.feedback,
-        "dockerfile_approved":   result.dockerfile_approved,
+        "requirements_approved": result.requirements_approved,
         "current_step":          f"orchestrator_routed_to_{result.next}",
         **revision_update,
     }
@@ -416,7 +415,7 @@ def installer(state: AgentState) -> dict:
         os.makedirs(build_dir, exist_ok=True)
         requirements_path = os.path.join(build_dir, "requirements.txt")
 
-        if state.get("dockerfile_approved"):
+        if state.get("requirements_approved"):
             # __ Phase 2: requirements approved -- pip install into the current venv __
             with open(requirements_path) as f:
                 packages = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
@@ -425,7 +424,7 @@ def installer(state: AgentState) -> dict:
                 console.print("[dim cyan][installer] no packages to install[/dim cyan]")
                 tracer.log_agent_output("installer", {"status": "no packages"})
                 tracer.log_agent_end("installer")
-                return {"image_tag": "", "current_step": "installer_complete"}
+                return {"current_step": "installer_complete"}
 
             console.print(f"[dim cyan][installer] pip installing {len(packages)} packages...[/dim cyan]")
             proc = subprocess.run(
@@ -439,7 +438,7 @@ def installer(state: AgentState) -> dict:
 
             tracer.log_agent_output("installer", {"status": "packages installed", "count": len(packages)})
             tracer.log_agent_end("installer")
-            return {"image_tag": "", "current_step": "installer_complete"}
+            return {"current_step": "installer_complete"}
 
         else:
             # __ Phase 1: read or generate requirements.txt, send to orchestrator for approval __
@@ -475,8 +474,8 @@ def installer(state: AgentState) -> dict:
             tracer.log_agent_output("installer", {"status": "pending approval", "packages": content.strip()})
             tracer.log_agent_end("installer")
             return {
-                "dockerfile":   content,
-                "current_step": "installer_requirements_pending_approval",
+                "requirements_content": content,
+                "current_step":         "installer_requirements_pending_approval",
             }
 
     except Exception as e:
@@ -584,9 +583,8 @@ if __name__ == "__main__":
         "stack_decision":        [],
         "tasks":                 [],
         "exploration_log":       [],
-        "dockerfile":            "",
-        "dockerfile_approved":   False,
-        "image_tag":             "",
+        "requirements_content":  "",
+        "requirements_approved": False,
         "current_step":          "start",
         "orchestrator_feedback": "",
         "next":                  "",
@@ -626,3 +624,4 @@ if __name__ == "__main__":
             console.print(f"  By agent:")
             for agent, count in sorted(tokens_by_agent.items()):
                 console.print(f"    {agent}: {count:,}")
+

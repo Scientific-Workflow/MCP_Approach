@@ -58,7 +58,7 @@ If any missing → run `pip install -r builds/requirements.txt`.
 
 - Never proceed to Phase 2 without `requirements_approved=True` in state
 - Always check for existing packages before installing — avoids unnecessary network calls
-- `image_tag` field is unused in venv mode; set to `""` or omit
+- The installer only manages requirements.txt and pip installs into the venv -- no other build/runtime state is tracked
 
 ---
 
