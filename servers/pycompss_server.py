@@ -57,13 +57,46 @@ _MPI_LIB_PATHS = (
     "/gpfs/fs1/soft/improv/software/custom-built/intel-oneapi-toolkit/mpi/2021.15/lib:"
     "/gpfs/fs1/soft/improv/software/custom-built/intel-oneapi-toolkit/mpi/2021.15/opt/mpi/libfabric/lib"
 )
+
+# COMPSs is NOT a pip-installable runtime -- it's a Java + C++ middleware installed via
+# its own ./install script (see skills/systems/pycompss.SKILL.md for the build story).
+# It lives outside the venv entirely and is activated via PYTHONPATH/LD_LIBRARY_PATH,
+# not site-packages. Override COMPSS_HOME if installed elsewhere.
+COMPSS_HOME = os.environ.get("COMPSS_HOME", os.path.expanduser("~/.local/COMPSs"))
+# COMPSs's own install only ever creates a major-version dir ("3"), regardless of
+# the actual Python 3.x minor version -- not a bug, just its naming convention.
+_COMPSS_PYTHON_PATH = os.path.join(COMPSS_HOME, "Bindings", "python", "3")
+_COMPSS_BINDINGS_LIB = os.path.join(COMPSS_HOME, "Bindings", "bindings-common", "lib")
+# The custom libxml2 build (no system libxml2-devel on this cluster) that COMPSs's
+# C++ bindings were linked against -- must stay on LD_LIBRARY_PATH at runtime too.
+_LIBXML2_LIB = os.path.expanduser("~/.local/libxml2/lib")
+JAVA_HOME = os.environ.get(
+    "JAVA_HOME",
+    "/gpfs/fs1/soft/improv/software/spack-built/linux-rhel8-zen3/gcc-12.3.0/openjdk-21.0.0_35-23zksi2",
+)
+
 _existing_ld = os.environ.get("LD_LIBRARY_PATH", "")
-_ld_library_path = _MPI_LIB_PATHS + (":" + _existing_ld if _existing_ld else "")
+_ld_library_path = (
+    _MPI_LIB_PATHS + ":" +
+    f"{_COMPSS_BINDINGS_LIB}:{_LIBXML2_LIB}:{os.path.join(JAVA_HOME, 'lib')}" +
+    (":" + _existing_ld if _existing_ld else "")
+)
+
+_existing_pythonpath = os.environ.get("PYTHONPATH", "")
+_task_pythonpath = _COMPSS_PYTHON_PATH + (":" + _existing_pythonpath if _existing_pythonpath else "")
 
 # The pip lammps package ships a compiled lmp binary alongside its Python bindings.
 _LMP_BIN_DIR = os.path.join(REPO_ROOT, "venv3", "lib", "python3.11", "site-packages", "lammps")
+# COMPSs's own CLI tools (runcompss, etc.) live in its Runtime/scripts dir, never on
+# PATH by default -- not used by our task execution (see _run_python_script), but
+# useful to have available for ad-hoc shell tasks.
+_COMPSS_BIN_DIRS = (
+    f"{os.path.join(COMPSS_HOME, 'Runtime', 'scripts', 'user')}:"
+    f"{os.path.join(COMPSS_HOME, 'Runtime', 'scripts', 'utils')}:"
+    f"{os.path.join(COMPSS_HOME, 'Bindings', 'c', 'bin')}"
+)
 _existing_path = os.environ.get("PATH", "")
-_task_path = _LMP_BIN_DIR + (":" + _existing_path if _existing_path else "")
+_task_path = f"{_LMP_BIN_DIR}:{_COMPSS_BIN_DIRS}" + (":" + _existing_path if _existing_path else "")
 
 TASK_ENV = {
     **os.environ,
@@ -72,6 +105,9 @@ TASK_ENV = {
     "OVITO_GUI_MODE": "0",
     "LD_LIBRARY_PATH": _ld_library_path,
     "PATH": _task_path,
+    "PYTHONPATH": _task_pythonpath,
+    "COMPSS_HOME": COMPSS_HOME,
+    "JAVA_HOME": JAVA_HOME,
     # Allow Intel MPI to initialize in a subprocess not launched via mpirun.
     "PMI_SIZE": "1",
     "PMI_RANK": "0",
@@ -182,23 +218,28 @@ def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int 
 
 
 def _run_python_script(script: str, work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
-    """Write a Python script to a temp file and execute it."""
-    os.makedirs(work_dir, exist_ok=True)
+    """Write a Python script to a temp file and execute it.
 
-    fd, script_path = tempfile.mkstemp(suffix=".py", prefix="_mcp_pycompss_task_", dir=work_dir)
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(script)
+    Always runs via plain VENV_PYTHON, never `runcompss` -- every caller passes a
+    script from _wrap_as_compss_task(), which already calls compss_start()/@task/
+    compss_wait_on()/compss_stop() itself ("direct" link mode, confirmed working by
+    hand). Launching that *through* runcompss too double-initializes the runtime:
+    runcompss's own launch.py starts a master process and re-execs the script inside
+    it, where the C extension `compss` module (the low-level runtime link, distinct
+    from the `pycompss` package) isn't importable -- it's runcompss's own internal
+    orchestration layer, not meant to wrap a script that self-manages its lifecycle.
+    """
+    # Kept (not deleted after running) in _task_scripts/ so the actual code submitted
+    # to this engine -- including the compss_start()/@task/compss_wait_on() wrapping
+    # _wrap_as_compss_task() injects -- is inspectable after the run, not just visible
+    # in the trace.json args field.
+    scripts_dir = os.path.join(work_dir, "_task_scripts")
+    os.makedirs(scripts_dir, exist_ok=True)
 
-        if _check_compss():
-            # Run through COMPSs runtime: runcompss <script>
-            return _run_command(["runcompss", script_path], work_dir=work_dir, timeout=timeout)
-        else:
-            # Fallback: direct Python execution
-            return _run_command([VENV_PYTHON, script_path], work_dir=work_dir, timeout=timeout)
-    finally:
-        if os.path.isfile(script_path):
-            os.remove(script_path)
+    fd, script_path = tempfile.mkstemp(suffix=".py", prefix="task_", dir=scripts_dir)
+    with os.fdopen(fd, "w") as f:
+        f.write(script)
+    return _run_command([VENV_PYTHON, script_path], work_dir=work_dir, timeout=timeout)
 
 
 def _wrap_as_compss_task(python_code: str) -> str:

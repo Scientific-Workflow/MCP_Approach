@@ -73,17 +73,63 @@ The `engine` field in task results indicates which mode was used:
 
 ## Running with COMPSs
 
-On HPC systems with COMPSs installed:
+On Improv there is no `module load COMPSs` -- it was hand-built (see "How COMPSs
+Got Installed on Improv" below) and lives at `~/.local/COMPSs`. `servers/pycompss_server.py`
+hardcodes the required env vars (`PYTHONPATH`, `LD_LIBRARY_PATH`, `COMPSS_HOME`,
+`JAVA_HOME`) into `TASK_ENV` with sensible defaults, so no manual setup is needed --
+just run normally:
 ```bash
-module load COMPSs
 python agent_mcp.py --engine pycompss --paper 1 --goal "..."
 ```
 
-On local machines without COMPSs:
+On local machines / other clusters without COMPSs:
 ```bash
 # Works fine -- falls back to direct execution
 python agent_mcp.py --engine pycompss --paper 1 --goal "..."
 ```
+
+---
+
+## How COMPSs Got Installed on Improv
+
+**`pip install pycompss` does not work reliably -- do not rely on it.** The PyPI
+`pycompss` package is a thin wrapper whose `setup.py` downloads the real ~925MB
+COMPSs distribution and runs its own install script as a side effect. Two bugs in
+that wrapper, both confirmed by direct reproduction:
+1. It silently installs to `~/.local/lib/.../site-packages` instead of the active
+   venv if `VIRTUAL_ENV` isn't set in the environment -- calling `./venv3/bin/pip`
+   directly (without `source venv3/bin/activate`) triggers this silently.
+2. Even with `VIRTUAL_ENV` set correctly, its nested
+   `pip install --no-build-isolation --target=... .` step for the Python bindings
+   can fail with `KeyError: 'TARGET_OS'` depending on call context -- an env-var
+   propagation bug in COMPSs's own `install.sh`/`setup.py`, not ours to fix.
+
+**What actually works: run COMPSs's real installer directly**, bypassing the pip
+wrapper entirely:
+```bash
+module load openjdk/21.0.0_35   # JAVA_HOME -- no module named "java", must use "openjdk"
+module load boost/1.84.0        # for the C++ bindings-common build
+# libxml2-devel has no module/package anywhere on Improv (no root, no spack CLI
+# exposed) -- built from source instead, shared (not static) so it can link into
+# COMPSs's .so targets:
+#   curl -LO https://download.gnome.org/sources/libxml2/2.12/libxml2-2.12.9.tar.xz
+#   ./configure --prefix=$HOME/.local/libxml2 --without-python && make -j4 && make install
+export PATH="$HOME/.local/libxml2/bin:$PATH"
+export CPATH="$HOME/.local/libxml2/include/libxml2:$CPATH"
+export LIBRARY_PATH="$HOME/.local/libxml2/lib:$LIBRARY_PATH"
+export LD_LIBRARY_PATH="$HOME/.local/libxml2/lib:$LD_LIBRARY_PATH"
+
+curl -LO http://compss.bsc.es/repo/sc/stable/COMPSs_3.4.tar.gz
+tar xzf COMPSs_3.4.tar.gz && cd COMPSs
+bash install --no-tracing ~/.local/COMPSs
+```
+Confirmed end-to-end: `compss_start()` / `compss_stop()` round-trip cleanly against
+this install. **COMPSs is not a site-packages install** -- its own installer puts the
+Python bindings at `~/.local/COMPSs/Bindings/python/3/pycompss` (always major version
+"3", regardless of the actual Python 3.x minor version) and expects activation via
+`PYTHONPATH`/`LD_LIBRARY_PATH`/`COMPSS_HOME`, not `pip`. `pycompss_server.py` builds
+these from `COMPSS_HOME` (defaults to `~/.local/COMPSs`, override via env var if
+installed elsewhere) so this is reproducible without re-deriving any of the above.
 
 ---
 
