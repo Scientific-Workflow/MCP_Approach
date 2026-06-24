@@ -144,3 +144,11 @@ summary message (no tool calls) listing:
 - Tasks completed successfully and their output files
 - Tasks that failed and the reason
 - Overall assessment of the workflow reproduction
+
+
+### Run LAMMPS (IMPORTANT)
+Call the `run_lammps` tool directly — do NOT use `submit_task` or write Python code for this:
+```
+run_lammps(script="in.watbox", work_dir="/app/work/run0")
+```
+The server handles HPC vs local execution automatically. Never modify in.watbox.

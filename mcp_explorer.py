@@ -574,6 +574,27 @@ async def _explorer_async(state: dict, engine: str) -> dict:
 
                 console.print(f"[dim cyan][explorer] calling tool: {tool_name}({json.dumps(tool_args, indent=2)[:200]})[/dim cyan]")
 
+                # load_skill is client-side (reads local skill files via _read_skill) --
+                # no MCP server implements it as a tool, so it must run locally rather
+                # than being forwarded to session.call_tool like every other tool below.
+                if tool_name == "load_skill":
+                    tool_result = load_skill.invoke(tool_args)
+                    console.print(f"[green][explorer] {tool_name} -> loaded locally[/green]")
+                    exploration_log.append({
+                        "iteration": iteration + 1,
+                        "tool": tool_name,
+                        "args": tool_args,
+                        "result": tool_result[:2000],
+                        "succeeded": True,
+                    })
+                    tracer.log_tool_call("explorer", tool_name, tool_args, tool_result,
+                                         True, iteration=iteration + 1)
+                    messages.append(ToolMessage(
+                        content=tool_result[:_MAX_TOOL_RESULT_CHARS],
+                        tool_call_id=tool_id,
+                    ))
+                    continue
+
                 # Call MCP tool with timeout protection
                 try:
                     mcp_result = await asyncio.wait_for(

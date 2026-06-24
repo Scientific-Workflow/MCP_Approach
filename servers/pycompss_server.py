@@ -391,7 +391,7 @@ def submit_shell_task(
             ),
         })
 
-    _work = work_dir if work_dir else DEFAULT_WORK_DIR
+    _work = _resolve_paths(work_dir) if work_dir else DEFAULT_WORK_DIR
 
     _tasks[task_id] = {
         "name": name,

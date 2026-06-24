@@ -438,6 +438,12 @@ def planner(state: AgentState) -> dict:
                     _human_msg,
                 ], "planner")
 
+        # ADIOS2 is the data-I/O layer for this engine -- don't leave it to LLM judgment
+        # whether to request it. Without it, every task silently falls back to numpy I/O
+        # (engine="adios2-fallback") with no real ADIOS2 transport ever exercised.
+        if state.get("engine") == "adios" and "adios2" not in result.stack_decision:
+            result.stack_decision.append("adios2")
+
         console.print(f"[dim cyan][planner] produced {len(result.tasks)} tasks[/dim cyan]")
 
         findings = "\n".join(f"  [cyan]*[/cyan] {f}" for f in result.literature_findings)
@@ -509,18 +515,35 @@ def installer(state: AgentState) -> dict:
             feedback = state.get("orchestrator_feedback", "")
             stack = state.get("stack_decision", [])
 
-            # If orchestrator rejected the previous requirements, regenerate from stack_decision
-            # instead of reading the stale file from disk.
-            if feedback and stack:
-                console.print("[dim cyan][installer] orchestrator rejected previous requirements -- regenerating from stack_decision...[/dim cyan]")
+            existing_content = None
+            if os.path.isfile(requirements_path):
+                with open(requirements_path) as f:
+                    existing_content = f.read()
+                existing_packages = {
+                    ln.strip() for ln in existing_content.splitlines()
+                    if ln.strip() and not ln.startswith("#")
+                }
+                stale = bool(stack) and existing_packages != set(stack)
+            else:
+                stale = False
+
+            # Regenerate from stack_decision if the orchestrator rejected the previous
+            # requirements, OR if the file on disk doesn't match this run's stack_decision
+            # (e.g. left over from a prior run with a different engine).
+            if (feedback and stack) or stale:
+                reason = (
+                    "orchestrator rejected previous requirements"
+                    if feedback else
+                    "on-disk requirements.txt is stale (doesn't match current stack_decision)"
+                )
+                console.print(f"[dim cyan][installer] {reason} -- regenerating from stack_decision...[/dim cyan]")
                 content = "\n".join(pkg for pkg in stack if pkg) + "\n"
                 with open(requirements_path, "w") as f:
                     f.write(content)
                 console.print(f"[dim cyan][installer] regenerated requirements.txt with {len(stack)} packages[/dim cyan]")
-            elif os.path.isfile(requirements_path):
-                console.print("[dim cyan][installer] reading existing requirements.txt...[/dim cyan]")
-                with open(requirements_path) as f:
-                    content = f.read()
+            elif existing_content is not None:
+                console.print("[dim cyan][installer] reading existing requirements.txt (matches stack_decision)...[/dim cyan]")
+                content = existing_content
             else:
                 console.print("[dim cyan][installer] generating requirements.txt from stack_decision...[/dim cyan]")
                 content = "\n".join(pkg for pkg in stack if pkg) + "\n"
