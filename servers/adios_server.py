@@ -14,7 +14,10 @@ When the ADIOS2 Python bindings are available, tasks use adios2 for data I/O
 between pipeline stages. When ADIOS2 is NOT available, tasks fall back to
 numpy file I/O (.npy/.npz) — same result, just without ADIOS2 optimizations.
 
-This server executes tasks locally (or in a virtual environment) using subprocess.
+ADIOS2 is an I/O layer, not a task scheduler, so it must be paired with a workflow
+engine. This server schedules task execution through Parsl's DataFlowKernel (reused
+from parsl_server) and uses ADIOS2 for the inter-stage data transport. If Parsl is
+unavailable it falls back to direct subprocess execution.
 Compatible with HPC environments where ADIOS2 is installed.
 
 The VENV_PYTHON environment variable controls which Python interpreter to use.
@@ -33,6 +36,44 @@ import time
 import tempfile
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
+
+# ADIOS2 is a data-I/O layer, NOT a task scheduler -- it cannot run a workflow on
+# its own. Real ADIOS workflows pair it with a workflow engine that schedules tasks.
+# We reuse parsl_server's Parsl DataFlowKernel (a real engine) to schedule execution,
+# while ADIOS2 (called from the generated task code) moves data between stages.
+# If Parsl is unavailable, fall back to direct subprocess execution.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # ensure sibling import works
+try:
+    import parsl
+    from parsl import python_app
+    # Reuse parsl_server's DFK loader (proven config incl. PBS allocation sizing). The
+    # loader runs in THIS process, so it's safe to import. The Parsl app itself must be
+    # defined locally (below) -- a cross-module @python_app fails to deserialize on
+    # HighThroughputExecutor workers ("No module named 'parsl_server'").
+    from parsl_server import _ensure_parsl as _ensure_scheduler
+    _SCHEDULER_AVAILABLE = True
+except Exception as _e:
+    print(f"[adios_server] Parsl scheduler unavailable ({_e}); using direct subprocess",
+          file=sys.stderr)
+    _SCHEDULER_AVAILABLE = False
+
+if _SCHEDULER_AVAILABLE:
+    @python_app
+    def _scheduler_app(cmd, work_dir, timeout, env):
+        """Parsl app -- defined locally so HTEX workers can deserialize it by value.
+        Runs one command on a worker and returns a result dict."""
+        import os, subprocess
+        os.makedirs(work_dir, exist_ok=True)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  cwd=work_dir, env=env, timeout=timeout)
+            return {"exit_code": proc.returncode,
+                    "stdout": proc.stdout.strip(),
+                    "stderr": proc.stderr.strip()}
+        except subprocess.TimeoutExpired:
+            return {"exit_code": -1, "stdout": "", "stderr": f"Command timed out after {timeout}s"}
+        except Exception as e:
+            return {"exit_code": -1, "stdout": "", "stderr": str(e)}
 
 # __ Server Setup ______________________________________________________________
 
@@ -71,7 +112,7 @@ def _check_adios2() -> bool:
     if _adios2_available is not None:
         return _adios2_available
 
-    result = _run_command(
+    result = _run_command_local(
         [VENV_PYTHON, "-c", "import adios2; print(adios2.__version__)"],
         timeout=15,
     )
@@ -86,8 +127,8 @@ _tasks: dict[str, dict] = {}
 
 # __ Execution Helpers _________________________________________________________
 
-def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
-    """Execute a command locally (or in venv) and return results."""
+def _run_command_local(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
+    """Execute a command directly via subprocess (the no-scheduler fallback path)."""
     os.makedirs(work_dir, exist_ok=True)
 
     try:
@@ -115,6 +156,23 @@ def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int 
             "stdout": "",
             "stderr": str(e),
         }
+
+
+def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
+    """Execute a command. ADIOS2 has no scheduler of its own, so route execution
+    through Parsl's DataFlowKernel (a real workflow engine) when available -- the task
+    code uses adios2 for inter-stage data transport. Falls back to direct subprocess.
+
+    Every tool funnels through here, so this single chokepoint makes the ADIOS engine
+    genuinely scheduler-backed (Parsl) rather than hand-rolled subprocess scheduling.
+    """
+    if _SCHEDULER_AVAILABLE and _ensure_scheduler():
+        try:
+            return _scheduler_app(cmd, work_dir, timeout, dict(TASK_ENV)).result()
+        except Exception as e:
+            print(f"[adios_server] Parsl scheduling failed ({e}); using direct subprocess",
+                  file=sys.stderr)
+    return _run_command_local(cmd, work_dir, timeout)
 
 
 def _run_python_script(script: str, work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
@@ -448,11 +506,23 @@ def read_file(path: str, max_lines: int = 100) -> str:
 
 @mcp.tool()
 def cleanup() -> str:
-    """Clean up resources. Clears the task registry."""
+    """Clean up resources: clears the task registry and shuts down the Parsl DFK."""
     global _tasks
     count = len(_tasks)
     _tasks = {}
-    return json.dumps({"status": "cleaned up", "tasks_cleared": count})
+    parsl_cleaned = False
+    if _SCHEDULER_AVAILABLE:
+        try:
+            import parsl
+            parsl.dfk().cleanup()
+            parsl_cleaned = True
+        except Exception:
+            pass
+    return json.dumps({
+        "status": "cleaned up",
+        "tasks_cleared": count,
+        "parsl_dfk_shutdown": parsl_cleaned,
+    })
 
 
 # __ Helpers ___________________________________________________________________
