@@ -693,26 +693,26 @@ if __name__ == "__main__":
             console.print("[yellow]No files found in data/ -- agents will have no input data.[/yellow]")
             selected_data_files = []
         else:
-        console.print("\n[bold]Available data files:[/bold]")
-        for i, name in enumerate(all_data_files, 1):
-            console.print(f"  {i}. {name}")
-        raw = input("\nSelect files by number (comma-separated, or Enter for all): ").strip()
-        if not raw:
-            selected_data_files = all_data_files
-            console.print("[dim]Using all data files.[/dim]")
-        else:
-            selected_data_files = []
-            for token in raw.split(","):
-                token = token.strip()
-                try:
-                    selected_data_files.append(all_data_files[int(token) - 1])
-                except (ValueError, IndexError):
-                    console.print(f"[yellow]Skipping invalid selection: {token!r}[/yellow]")
-            if not selected_data_files:
-                console.print("[yellow]No valid files selected -- using all.[/yellow]")
+            console.print("\n[bold]Available data files:[/bold]")
+            for i, name in enumerate(all_data_files, 1):
+                console.print(f"  {i}. {name}")
+            raw = input("\nSelect files by number (comma-separated, or Enter for all): ").strip()
+            if not raw:
                 selected_data_files = all_data_files
+                console.print("[dim]Using all data files.[/dim]")
             else:
-                console.print(f"[dim]Selected: {', '.join(selected_data_files)}[/dim]")
+                selected_data_files = []
+                for token in raw.split(","):
+                    token = token.strip()
+                    try:
+                        selected_data_files.append(all_data_files[int(token) - 1])
+                    except (ValueError, IndexError):
+                        console.print(f"[yellow]Skipping invalid selection: {token!r}[/yellow]")
+                if not selected_data_files:
+                    console.print("[yellow]No valid files selected -- using all.[/yellow]")
+                    selected_data_files = all_data_files
+                else:
+                    console.print(f"[dim]Selected: {', '.join(selected_data_files)}[/dim]")
 
     # Handle goal
     if args.goal:
