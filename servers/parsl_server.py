@@ -491,7 +491,7 @@ def submit_shell_task(
             ),
         })
 
-    _work = work_dir if work_dir else DEFAULT_WORK_DIR
+    _work = _resolve_paths(work_dir) if work_dir else DEFAULT_WORK_DIR
 
     _tasks[task_id] = {
         "name": name,
@@ -729,7 +729,7 @@ def submit_mpi_task(
         JSON with task_id, status, exit_code, stdout, stderr
     """
     task_id = f"task_{uuid.uuid4().hex[:8]}"
-    _work = work_dir if work_dir else DEFAULT_WORK_DIR
+    _work = _resolve_paths(work_dir) if work_dir else DEFAULT_WORK_DIR
 
     resources = _detect_resources()
     ranks = num_ranks if num_ranks > 0 else resources["ntasks"]

@@ -48,12 +48,6 @@ cp /app/data/data.init /app/work/run0/
 cp /app/data/in.watbox /app/work/run0/
 ```
 
-### Run LAMMPS
-Call the `run_lammps` tool directly — do NOT use `submit_task` or write Python code for this:
-```
-run_lammps(script="in.watbox", work_dir="/app/work/run0")
-```
-The server handles HPC vs local execution automatically. Never modify in.watbox.
 
 ### Expected output
 - `/app/work/run0/frames/step.*.lammpstrj` — trajectory files
@@ -255,3 +249,11 @@ print("Timeseries plot saved")
 - `/app/data/in.watbox` -- LAMMPS input script. Parameters: `run 9000`, `timestep 0.01`, `variable T equal 180`, `variable P equal 1.0`. DO NOT modify.
 - `/app/data/data.init` -- initial atom positions
 - `/app/data/AW.tersoff` -- Tersoff force field for water
+
+
+### Run LAMMPS
+Call the `run_lammps` tool directly — do NOT use `submit_task` or write Python code for this:
+```
+run_lammps(script="in.watbox", work_dir="/app/work/run0")
+```
+The server handles HPC vs local execution automatically. Never modify in.watbox.
