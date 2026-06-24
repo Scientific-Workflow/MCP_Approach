@@ -39,6 +39,7 @@ from trace_schema import (
     RoutingEvent, ToolCallEvent, SkillLoadEvent, LLMCallEvent,
     ReplanEvent, RunErrorEvent, ArtifactManifestEvent, MessageEvent,
     TokenUsageEvent, RunMetadata, TraceFile,
+    CONDITION_DETAILS_BY_LETTER, EvaluationScores,
 )
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -113,10 +114,24 @@ class TraceLogger:
     # __ Run metadata ____________________________________________________________
 
     def start_run(self, **kwargs):
-        """Initialize run-level metadata. Call once at the start of a run."""
+        """Initialize run-level metadata. Call once at the start of a run.
+
+        `condition_details` is auto-filled from `condition` (A/B/C) via
+        CONDITION_DETAILS_BY_LETTER unless explicitly passed. `run_matrix_id`
+        is auto-built from domain/framework/condition/trial unless explicitly
+        passed -- pass it yourself if you need a different naming scheme.
+        """
         kwargs.setdefault("start_time", self._now())
         kwargs.setdefault("code_commit", _git_commit())
+        condition = kwargs.get("condition", "B")
+        kwargs.setdefault("condition_details", CONDITION_DETAILS_BY_LETTER.get(condition))
         self.run_metadata = RunMetadata(**kwargs)
+        if not self.run_metadata.run_matrix_id:
+            domain = self.run_metadata.domain or "unknown_domain"
+            self.run_metadata.run_matrix_id = (
+                f"{domain}_{self.run_metadata.framework}_"
+                f"{self.run_metadata.condition}_trial{self.run_metadata.trial}"
+            )
 
     def finalize_run(self, final_status: str):
         """Record end-of-run status. Call exactly once, on success or failure."""
@@ -124,6 +139,22 @@ class TraceLogger:
             self.start_run(run_id="unknown")
         self.run_metadata.end_time = self._now()
         self.run_metadata.final_status = final_status
+
+    def update_evaluation(self, **scores):
+        """Set evaluation scores on the in-memory run (before tracer.save()).
+
+        Accepts any subset of tier1_end_to_end, tier2_config_score,
+        tier3_output_score, failure_stage -- only the passed keys are
+        overwritten, others keep their current value (null by default).
+        Use this if a grader runs in-process right after the graph finishes,
+        before tracer.save() is called. For grading done later against an
+        already-saved trace.json, use update_trace_evaluation() instead.
+        """
+        if self.run_metadata is None:
+            self.start_run(run_id="unknown")
+        current = self.run_metadata.evaluation.model_dump()
+        current.update(scores)
+        self.run_metadata.evaluation = EvaluationScores(**current)
 
     # __ Event logging ____________________________________________________________
 
@@ -317,6 +348,52 @@ class TraceLogger:
         self.start_time = time.time()
         self._agent_starts = {}
         self.run_metadata = None
+
+
+def update_trace_evaluation(
+    path: str,
+    tier1_end_to_end: Optional[float] = None,
+    tier2_config_score: Optional[float] = None,
+    tier3_output_score: Optional[float] = None,
+    failure_stage: Optional[str] = None,
+) -> None:
+    """Patch the evaluation scores of an already-saved trace.json on disk.
+
+    This is the normal way to fill in grades: a run finishes and tracer.save()
+    writes the trace with evaluation all null, then a grader (human or script)
+    reads the run's artifacts/outputs and calls this afterward to record the
+    scores. Only the keyword args you pass are overwritten; omitted ones keep
+    whatever is already in the file. Re-validates the whole file before
+    writing it back, so a typo'd path or a hand-edited trace will fail loudly
+    instead of silently corrupting the file.
+
+    Example:
+        update_trace_evaluation(
+            "runs/20260624_103738_trace.json",
+            tier1_end_to_end=1.0,
+            tier3_output_score=0.8,
+            failure_stage=None,
+        )
+    """
+    with open(path) as f:
+        payload = json.load(f)
+
+    current = payload["run_metadata"].get("evaluation") or {}
+    updates = {
+        "tier1_end_to_end": tier1_end_to_end,
+        "tier2_config_score": tier2_config_score,
+        "tier3_output_score": tier3_output_score,
+        "failure_stage": failure_stage,
+    }
+    for key, value in updates.items():
+        if value is not None:
+            current[key] = value
+    payload["run_metadata"]["evaluation"] = current
+
+    TraceFile.model_validate(payload)  # raises if the patched file is now invalid
+
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
 
 
 def extract_usage(response: Any) -> Optional[dict]:

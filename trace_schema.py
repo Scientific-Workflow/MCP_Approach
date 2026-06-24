@@ -139,9 +139,37 @@ Event = Annotated[
 
 # __ Run-level metadata _________________________________________________________
 
+class ConditionDetails(BaseModel):
+    """What an ablation condition letter actually means, spelled out so the
+    trace is self-explanatory without cross-referencing the experiment design doc."""
+    architecture: Literal["multi_agent", "single_agent"]
+    skills_enabled: bool
+    tools_enabled: bool
+
+
+# Fixed mapping from condition letter to its ablation meaning. Used to
+# auto-fill RunMetadata.condition_details in TraceLogger.start_run().
+CONDITION_DETAILS_BY_LETTER: dict[str, ConditionDetails] = {
+    "A": ConditionDetails(architecture="multi_agent", skills_enabled=False, tools_enabled=True),
+    "B": ConditionDetails(architecture="multi_agent", skills_enabled=True, tools_enabled=True),
+    "C": ConditionDetails(architecture="single_agent", skills_enabled=True, tools_enabled=True),
+}
+
+
+class EvaluationScores(BaseModel):
+    """Grading results, filled in after the fact by an eval/scoring pass.
+    All null until that pass runs -- the trace schema is the same before and after grading."""
+    tier1_end_to_end: Optional[float] = None
+    tier2_config_score: Optional[float] = None
+    tier3_output_score: Optional[float] = None
+    failure_stage: Optional[str] = None
+
+
 class RunMetadata(BaseModel):
     run_id: str
+    run_matrix_id: str = ""
     condition: Literal["A", "B", "C"] = "B"
+    condition_details: Optional[ConditionDetails] = None
     trial: int = 1
     paper_id: str = ""
     paper_path: str = ""
@@ -155,7 +183,9 @@ class RunMetadata(BaseModel):
     end_time: Optional[str] = None
     final_status: Literal["completed", "failed", "timeout", "unknown"] = "unknown"
     config_spec_ref: Optional[str] = None
+    is_eval_run: bool = False
     code_commit: Optional[str] = None
+    evaluation: EvaluationScores = EvaluationScores()
 
 
 class TraceSummary(BaseModel):

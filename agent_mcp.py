@@ -599,7 +599,18 @@ if __name__ == "__main__":
                         help="Trial number for repeated (paper, condition) runs (default: 1)")
     parser.add_argument("--domain", type=str, default="",
                         help="Paper domain label, e.g. molecular_nucleation (optional)")
+    parser.add_argument("--eval-run", action="store_true",
+                        help="Mark this as a real eval run (vs. a dev/smoke run). Requires --config-spec-ref.")
+    parser.add_argument("--config-spec-ref", type=str, default=None,
+                        help="Path/ID of the ground-truth config spec to grade this run against")
+    parser.add_argument("--skip-data", action="store_true",
+                        help="Skip the data/ file selection prompt -- agents get no local input data files "
+                             "(use for use cases like cosmology that source their own inputs elsewhere)")
     args = parser.parse_args()
+
+    if args.eval_run and not args.config_spec_ref:
+        console.print("[red]--eval-run requires --config-spec-ref (a real eval run needs ground truth to grade against).[/red]")
+        raise SystemExit(1)
 
     console.print(Panel(f"[bold blue]MAW -- Multi-Agent Workflow (MCP Approach)[/bold blue]\n[dim]Engine: {args.engine} | Env: {args.env}[/dim]", border_style="blue"))
 
@@ -671,13 +682,17 @@ if __name__ == "__main__":
                     image_path = ""
 
     # Handle data file selection
-    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-    all_data_files = sorted(f for f in os.listdir(data_dir) if os.path.isfile(os.path.join(data_dir, f))) if os.path.isdir(data_dir) else []
-
-    if not all_data_files:
-        console.print("[yellow]No files found in data/ -- agents will have no input data.[/yellow]")
+    if args.skip_data:
+        console.print("[dim]--skip-data set -- agents will have no local input data files.[/dim]")
         selected_data_files = []
     else:
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        all_data_files = sorted(f for f in os.listdir(data_dir) if os.path.isfile(os.path.join(data_dir, f))) if os.path.isdir(data_dir) else []
+
+        if not all_data_files:
+            console.print("[yellow]No files found in data/ -- agents will have no input data.[/yellow]")
+            selected_data_files = []
+        else:
         console.print("\n[bold]Available data files:[/bold]")
         for i, name in enumerate(all_data_files, 1):
             console.print(f"  {i}. {name}")
@@ -751,6 +766,8 @@ if __name__ == "__main__":
         env=args.env,
         goal=goal,
         model=os.getenv("MODEL_NAME", "claudeopus48"),
+        is_eval_run=args.eval_run,
+        config_spec_ref=args.config_spec_ref,
     )
 
     try:
