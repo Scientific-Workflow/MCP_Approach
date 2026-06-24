@@ -117,11 +117,21 @@ class MessageEvent(BaseEvent):
     model_config = {"populate_by_name": True}
 
 
+class TokenUsageEvent(BaseEvent):
+    type: Literal["token_usage"] = "token_usage"
+    agent: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    model: str = ""
+
+
 Event = Annotated[
     Union[
         AgentStartEvent, AgentInputEvent, AgentOutputEvent, AgentEndEvent,
         RoutingEvent, ToolCallEvent, SkillLoadEvent, LLMCallEvent,
         ReplanEvent, RunErrorEvent, ArtifactManifestEvent, MessageEvent,
+        TokenUsageEvent,
     ],
     Field(discriminator="type"),
 ]

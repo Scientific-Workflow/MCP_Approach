@@ -38,7 +38,7 @@ from trace_schema import (
     AgentStartEvent, AgentInputEvent, AgentOutputEvent, AgentEndEvent,
     RoutingEvent, ToolCallEvent, SkillLoadEvent, LLMCallEvent,
     ReplanEvent, RunErrorEvent, ArtifactManifestEvent, MessageEvent,
-    RunMetadata, TraceFile,
+    TokenUsageEvent, RunMetadata, TraceFile,
 )
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -208,15 +208,12 @@ class TraceLogger:
         """Record token consumption for a single LLM call made by an agent."""
         if not total_tokens:
             total_tokens = input_tokens + output_tokens
-        self.events.append({
-            "type": "token_usage",
-            "agent": agent_name,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": total_tokens,
-            "model": model,
-            "elapsed_s": self._elapsed(),
-        })
+        event = TokenUsageEvent(
+            agent=agent_name, input_tokens=input_tokens, output_tokens=output_tokens,
+            total_tokens=total_tokens, model=model,
+            elapsed_s=self._elapsed(), timestamp=self._now(),
+        )
+        self.events.append(event.model_dump())
 
     def log_message(self, from_agent: str, to_agent: str, message: str):
         """Record a message passed between agents via state."""
