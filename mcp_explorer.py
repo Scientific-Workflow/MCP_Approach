@@ -470,9 +470,22 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                     console.print(f"[dim cyan][explorer] loaded use case skill: {uc_name}[/dim cyan]")
                     break
 
+        # Load the engine's system skill ONLY for engines that are data-I/O libraries
+        # the task code must call directly (ADIOS2). For scheduler engines (Parsl,
+        # PyCOMPSs) the MCP server handles scheduling, so the explorer must NOT write
+        # @python_app/@task code -- injecting their skill would mislead it. ADIOS2 is
+        # the opposite: it only does its job if the generated task code uses adios2
+        # for inter-stage data transport, which this skill mandates.
+        _IO_LIBRARY_ENGINES = {"adios"}
+        _engine_skill = _read_skill(f"systems/{engine}") if engine in _IO_LIBRARY_ENGINES else ""
+        if _engine_skill:
+            console.print(f"[dim cyan][explorer] loaded engine skill: systems/{engine}[/dim cyan]")
+
         system_prompt = EXPLORER_SYSTEM_PROMPT
         if _base_skill:
             system_prompt = _base_skill + "\n\n---\n\n" + system_prompt
+        if _engine_skill:
+            system_prompt += f"\n\n--- Engine Guidance ({engine}) ---\n\n" + _engine_skill
         if _uc_skill:
             system_prompt += "\n\n--- Use Case Context ---\n\n" + _uc_skill
 

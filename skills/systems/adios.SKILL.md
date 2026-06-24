@@ -16,6 +16,52 @@ and in-memory (DataMan) data exchange.
 
 ---
 
+## OPERATING DIRECTIVE (engine = adios) -- MANDATORY
+
+When this engine is selected, ADIOS2 is the data-transport layer of the workflow.
+You MUST use it; it is not optional decoration.
+
+1. **Exchange array/grid/trajectory data between stages via ADIOS2 BP files**, not
+   raw `.npy` / `.npz` / `.csv` / `.lammpstrj`. The stage that produces numerical
+   data writes a `.bp` file with `adios2`; the stage that consumes it reads that
+   `.bp` file with `adios2`.
+2. **Every task that produces or consumes inter-stage numerical data must contain an
+   `adios2.open(...)` call.** If you write a stage with plain numpy/CSV I/O for data
+   that a later stage reads, you are NOT using the engine -- rewrite it with adios2.
+3. Keep BP files under `/app/work/run0/` (e.g. `/app/work/run0/sim_output.bp`).
+4. Small scalars/metadata and final human-facing artifacts (PNG plots, a summary CSV)
+   may stay as normal files -- the directive is about **inter-stage data transport**.
+5. If `import adios2` fails (ADIOS2 not installed), the run is in fallback mode: it is
+   acceptable to fall back to numpy I/O, but state clearly in your summary that ADIOS2
+   transport was unavailable.
+
+### Minimal producer -> consumer pattern (follow this shape)
+
+```python
+# --- Producer stage: write per-step arrays to a BP file ---
+import adios2, numpy as np
+with adios2.open("/app/work/run0/sim_output.bp", "w") as fw:
+    for step in range(n_steps):
+        arr = compute_frame(step)              # np.ndarray, e.g. positions or a field
+        fw.write("frame", arr, arr.shape, [0]*arr.ndim, arr.shape)
+        fw.write("step", np.array(step))
+        fw.end_step()
+
+# --- Consumer stage: read them back for analysis ---
+import adios2, numpy as np
+with adios2.open("/app/work/run0/sim_output.bp", "r") as fr:
+    for step in fr:
+        arr = step.read("frame")
+        analyze(arr)                           # OVITO/numpy analysis, accumulate results
+```
+
+For the LAMMPS nucleation pipeline specifically: have the simulation/extraction stage
+write trajectory frames (positions, per-atom quantities) into `sim_output.bp`, and have
+the OVITO/analysis stage read frames from `sim_output.bp` instead of re-reading
+`.lammpstrj`. The final timeseries plot + `results.csv` are normal output files.
+
+---
+
 ## Key API
 
 ```python
