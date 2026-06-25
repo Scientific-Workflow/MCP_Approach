@@ -332,19 +332,19 @@ def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int 
 
 
 def _run_python_script(script: str, work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
-    """Write a Python script to a temp file and execute it with VENV_PYTHON."""
-    os.makedirs(work_dir, exist_ok=True)
+    """Write a Python script to a file and execute it with VENV_PYTHON.
 
-    # Write script to a temp file
-    fd, script_path = tempfile.mkstemp(suffix=".py", prefix="_mcp_task_", dir=work_dir)
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(script)
-        return _run_command([VENV_PYTHON, script_path], work_dir=work_dir, timeout=timeout)
-    finally:
-        # Clean up temp script
-        if os.path.isfile(script_path):
-            os.remove(script_path)
+    Kept (not deleted after running) in _task_scripts/ so the actual code submitted
+    to this engine is inspectable after the run, not just visible in the trace.json
+    args field.
+    """
+    scripts_dir = os.path.join(work_dir, "_task_scripts")
+    os.makedirs(scripts_dir, exist_ok=True)
+
+    fd, script_path = tempfile.mkstemp(suffix=".py", prefix="task_", dir=scripts_dir)
+    with os.fdopen(fd, "w") as f:
+        f.write(script)
+    return _run_command([VENV_PYTHON, script_path], work_dir=work_dir, timeout=timeout)
 
 
 # __ MCP Tools _________________________________________________________________

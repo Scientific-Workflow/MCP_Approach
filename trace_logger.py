@@ -169,8 +169,9 @@ class TraceLogger:
                                elapsed_s=self._elapsed(), timestamp=self._now())
         self.events.append(event.model_dump())
 
-    def log_skill_load(self, agent_name: str, skill_path: str, found: bool):
+    def log_skill_load(self, agent_name: str, skill_path: str, found: bool, suppressed: bool = False):
         event = SkillLoadEvent(agent=agent_name, skill_path=skill_path, found=found,
+                                suppressed=suppressed,
                                 elapsed_s=self._elapsed(), timestamp=self._now())
         self.events.append(event.model_dump())
 

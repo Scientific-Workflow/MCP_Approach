@@ -81,15 +81,41 @@ def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
 _SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
 
 
-def _read_skill(rel_path: str, agent_name: str = "explorer") -> str:
-    """Read skills/<rel_path>.SKILL.md -- returns '' if not found. Logs the load attempt."""
+def _read_skill(rel_path: str, agent_name: str = "explorer", enabled: bool = True) -> str:
+    """Read skills/<rel_path>.SKILL.md -- returns '' if disabled (condition A) or not found.
+
+    Condition A never touches the filesystem under skills/ at all -- not even an
+    os.path.isfile check -- so disabled short-circuits before any I/O happens.
+    """
+    if not enabled:
+        tracer.log_skill_load(agent_name, rel_path, found=False, suppressed=True)
+        return ""
     full = os.path.join(_SKILLS_ROOT, rel_path + ".SKILL.md")
     found = os.path.isfile(full)
-    tracer.log_skill_load(agent_name, rel_path, found)
+    tracer.log_skill_load(agent_name, rel_path, found, suppressed=False)
     if found:
         with open(full) as f:
             return f.read()
     return ""
+
+
+# Set once per explorer run (see explorer()/_explorer_async) so the module-level
+# `load_skill` tool -- which the LLM calls with no access to AgentState -- can see
+# the current ablation condition.
+_current_condition: str = "B"
+
+# Mirrors agent_mcp.ENV_NOTES. Duplicated rather than imported to avoid a circular
+# import (agent_mcp imports `explorer` from this module).
+ENV_NOTES = {
+    "local": (
+        "Environment: a single local machine, no job scheduler. No PBS/LSF, no multi-node "
+        "MPI. /app/ paths are resolved to the repo root at runtime."
+    ),
+    "hpc": (
+        "Environment: an HPC cluster, presumably inside a job allocation. /app/ paths are "
+        "resolved to the repo root at runtime; never hardcode cluster-specific absolute paths."
+    ),
+}
 
 
 @tool
@@ -254,8 +280,14 @@ def load_skill(name: str) -> str:
     Args:
         name: "local" or "hpc"
     """
-    content = _read_skill(_KNOWLEDGE_SKILLS.get(name, ""))
-    return content or f"Unknown skill '{name}'. Use 'local' or 'hpc'."
+    if name not in _KNOWLEDGE_SKILLS:
+        return f"Unknown skill '{name}'. Use 'local' or 'hpc'."
+    # condition B/C: read the real curated skill file, unchanged.
+    # condition A: the skill file is suppressed (never touched) -- return the same
+    # lean ENV_NOTES substitute used by the orchestrator/planner in this condition.
+    enabled = _current_condition != "A"
+    content = _read_skill(_KNOWLEDGE_SKILLS[name], enabled=enabled)
+    return content or ENV_NOTES.get(name, ENV_NOTES["local"])
 
 
 # All tools available to the explorer
@@ -370,8 +402,9 @@ def explorer(state: dict) -> dict:
     Explorer node -- connects to MCP server and runs a ReAct tool-calling loop
     to execute workflow tasks step by step.
     """
-    global _mcp_session, _event_loop
+    global _mcp_session, _event_loop, _current_condition
 
+    _current_condition = state.get("condition", "B")
     console.print("\n[dim cyan][explorer] starting interactive workflow execution...[/dim cyan]")
     tracer.log_agent_start("explorer", {"engine": state.get("engine", "parsl")})
     tracer.log_agent_input("explorer", {
@@ -450,25 +483,28 @@ async def _explorer_async(state: dict, engine: str) -> dict:
             context_parts.append("Tasks to execute:\n" +
                                  "\n".join(f"  {i+1}. {t}" for i, t in enumerate(tasks)))
 
-        # Load skill files
-        _base_skill = _read_skill("agents/explorer")
+        # Load skill files -- condition A never touches skills/ at all, not even to list
+        # the use_cases/ directory, so the whole auto-detection block is skipped outright.
+        _enabled = state.get("condition", "B") != "A"
+        _base_skill = _read_skill("agents/explorer", enabled=_enabled)
         _uc_skill = ""
-        # Auto-detect use case: scan all use_cases/*/explorer.SKILL.md files,
-        # check if their description matches any package in stack_decision.
-        # This replaces the hardcoded 'if "lammps"' check.
-        _stack_lower = [p.lower() for p in stack_decision]
-        _uc_dir = os.path.join(_SKILLS_ROOT, "use_cases")
-        if os.path.isdir(_uc_dir):
-            for uc_name in os.listdir(_uc_dir):
-                content = _read_skill(f"use_cases/{uc_name}/explorer")
-                if not content:
-                    continue
-                # Match if any stack package appears in the skill file description
-                desc_lower = content[:500].lower()
-                if any(pkg in desc_lower for pkg in _stack_lower):
-                    _uc_skill = content
-                    console.print(f"[dim cyan][explorer] loaded use case skill: {uc_name}[/dim cyan]")
-                    break
+        if _enabled:
+            # Auto-detect use case: scan all use_cases/*/explorer.SKILL.md files,
+            # check if their description matches any package in stack_decision.
+            # This replaces the hardcoded 'if "lammps"' check.
+            _stack_lower = [p.lower() for p in stack_decision]
+            _uc_dir = os.path.join(_SKILLS_ROOT, "use_cases")
+            if os.path.isdir(_uc_dir):
+                for uc_name in os.listdir(_uc_dir):
+                    content = _read_skill(f"use_cases/{uc_name}/explorer")
+                    if not content:
+                        continue
+                    # Match if any stack package appears in the skill file description
+                    desc_lower = content[:500].lower()
+                    if any(pkg in desc_lower for pkg in _stack_lower):
+                        _uc_skill = content
+                        console.print(f"[dim cyan][explorer] loaded use case skill: {uc_name}[/dim cyan]")
+                        break
 
         system_prompt = EXPLORER_SYSTEM_PROMPT
         if _base_skill:

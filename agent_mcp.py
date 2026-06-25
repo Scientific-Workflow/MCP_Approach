@@ -72,6 +72,7 @@ class AgentState(TypedDict):
     explorer_revisions:    int
     engine:                str              # workflow engine: "parsl", "pycompss", etc.
     env:                   str              # execution environment: "local" or "hpc"
+    condition:              str             # ablation condition: "A" (no-skills), "B" (full), "C" (single-agent)
 
 
 # __ Pydantic Schemas __________________________________________________________
@@ -107,6 +108,62 @@ Return ONLY a valid JSON object with exactly these keys:
 \
 """
 
+# __ Condition-A (no-skills) prompt -- separate, hand-written, never derived from the skill files __
+# Per the eval plan: condition A's system prompt contains role definitions, tool/agent catalogs,
+# and task framing only -- no procedural heuristics. This is an isolated constant on purpose
+# (see memory: add new isolated files/constants per use case rather than editing shared ones).
+ORCHESTRATOR_SYSTEM_PROMPT_NO_SKILLS = """\
+You are the supervisor orchestrator for a scientific workflow reproduction system. You coordinate
+specialized agents to reproduce a computational workflow from a research paper in a local venv
+environment. After each agent completes, you review its output and decide where to route next.
+
+This is the MCP (tool-calling) approach: instead of generating a complete workflow script, the
+explorer agent executes each task interactively via tool calls against a workflow-engine MCP server.
+
+## Agents Available
+
+| Agent | What it does |
+|---|---|
+| `planner` | Reads the PDF, extracts literature findings, dependency stack, and ordered tasks |
+| `installer` | Sets up the local venv (two-phase: requirements.txt -> pip install) |
+| `explorer` | Executes workflow tasks step by step using tool calls in the local venv |
+| `end` | Signals successful completion |
+
+General flow: planner -> installer -> explorer -> end.
+
+## Two-Phase Installer Protocol
+
+The installer runs in two phases requiring your explicit sign-off:
+- Phase 1: it generates requirements.txt and stops; `current_step` becomes
+  `"installer_requirements_pending_approval"`.
+- Phase 2: it runs `pip install`, but only once you set `requirements_approved=true`.
+
+When `current_step == "installer_requirements_pending_approval"`, decide `requirements_approved`
+by reviewing the `requirements_content` in the state below. In every other situation,
+`requirements_approved` must be `false`.
+
+## State Fields Available to You
+
+| Field | Source | Notes |
+|---|---|---|
+| `goal` | initial | The user's goal |
+| `current_step` | updated each node | What just completed |
+| `literature_findings` | planner | Key findings from the paper |
+| `stack_decision` | planner | Required packages |
+| `tasks` | planner | Ordered implementation steps |
+| `requirements_content` | installer phase 1 | requirements.txt content -- review before approving |
+| `exploration_log` | explorer | Tool call records (accumulated list of dicts) |
+| `planner_revisions` / `installer_revisions` / `explorer_revisions` | orchestrator | Retry counts |
+
+Return ONLY a valid JSON object with exactly these keys:
+- reasoning:           str -- your analysis of the current state
+- next:                "planner" | "installer" | "explorer" | "end"
+- feedback:            str -- specific actionable feedback for the receiving agent, or "" if proceeding normally
+- requirements_approved: bool -- true ONLY when approving pending requirements.txt, false in all other cases
+- skill_requests:      list[str] -- always leave this empty; no skill content is available in this run
+\
+"""
+
 PLANNER_PROMPT = """\
 Your agent skill file contains your full operating instructions. Follow them.
 
@@ -134,6 +191,49 @@ HANDLING ORCHESTRATOR FEEDBACK:
 If the input ends with "Orchestrator feedback", fix every issue raised before returning.\
 """
 
+# __ Condition-A (no-skills) prompt -- separate, hand-written, never derived from the skill files __
+# Same isolation rule as ORCHESTRATOR_SYSTEM_PROMPT_NO_SKILLS above.
+PLANNER_PROMPT_NO_SKILLS = """\
+You are a scientific workflow analyst. Given the full text of a research paper and a goal, extract
+everything needed to reproduce the computational workflow described in the paper.
+
+## What Tasks Are in the MCP Approach
+
+Tasks describe what the explorer agent executes via MCP tool calls -- not code to write to a file
+and run. There is no workflow.py, no main(), no bash launcher, no @python_app definitions. The
+explorer calls `submit_task` with inline Python code directly, or a domain-specific tool when the
+goal names one (e.g. a simulation runner).
+
+## Software Available
+
+Depending on the workflow, packages such as LAMMPS, OVITO, Parsl, PyCOMPSs, ADIOS2, numpy, and
+matplotlib may be installed or installable into the local venv. Only request packages that are
+actually needed for this paper's workflow -- never invent packages.
+
+Return ONLY a valid JSON object with exactly these keys:
+- literature_findings: list[str] -- specific, quantitative facts extracted from the paper
+- stack_decision:      list[str] -- packages to install into the local venv
+- tasks:               list[str] -- ordered, Python-API-level implementation steps the explorer will execute
+- skill_requests:      list[str] -- always leave this empty; no skill content is available in this run
+
+No markdown, no code fences, no explanation outside the JSON.
+
+IMPORTANT CONSTRAINTS ON TASKS:
+- Do NOT include tasks to reproduce performance benchmarks, scaling plots, or timing
+  comparisons from the paper unless the environment knowledge confirms the resources exist.
+- Do NOT include tasks that fabricate or simulate fake benchmark data to mimic the
+  paper's performance results.
+- DO include tasks that reproduce the actual scientific computation (simulation,
+  analysis, visualization) using data generated by the workflow itself.
+- All visualizations must use data produced by the workflow, not hardcoded values
+  from the paper.
+- Follow the environment knowledge injected into your context (local or HPC) for
+  what parallelism, MPI, and job launcher commands are appropriate.
+
+HANDLING ORCHESTRATOR FEEDBACK:
+If the input ends with "Orchestrator feedback", fix every issue raised before returning.\
+"""
+
 
 # __ Project layout (injected into context) ____________________________________
 ######################################################################## Project layout -- this is injected into the system prompt for all agents, so they understand where to read/write files and how the repo maps to runtime paths. Update as needed for your project. ################################################################
@@ -142,9 +242,13 @@ PROJECT_LAYOUT = """\
 Repo directory tree -- the repo root is mapped to /app/ at runtime:
 
 /app/                                  <- repo root
-+-- agent_mcp.py
++-- agent_mcp.py                       <- orchestrator/planner/installer + graph
 +-- mcp_tools.py
-+-- mcp_explorer.py
++-- mcp_explorer.py                    <- explorer agent (ReAct loop, MCP client)
++-- servers/                           <- MCP server backends, one per workflow engine
+|   +-- parsl_server.py
+|   +-- pycompss_server.py
+|   +-- adios_server.py
 +-- requirements.txt
 +-- .env
 +-- data/
@@ -153,6 +257,8 @@ Repo directory tree -- the repo root is mapped to /app/ at runtime:
 |   +-- AW.tersoff                     <- LAMMPS force field parameters
 +-- Literature/
 |   +-- *.pdf
++-- images/
+|   +-- *.png / *.jpg                  <- optional planning diagrams/figures
 +-- builds/                            <- installer-generated requirements
 |   +-- requirements.txt               <- venv package list
 +-- work/                              <- explorer output goes here
@@ -200,11 +306,18 @@ def _invoke_structured(llm, schema, messages, agent_name, retries=5):
 
 _SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
 
-def _read_skill(rel_path: str, agent_name: str) -> str:
-    """Read skills/<rel_path>.SKILL.md -- returns '' if not found. Logs the load attempt."""
+def _read_skill(rel_path: str, agent_name: str, enabled: bool = True) -> str:
+    """Read skills/<rel_path>.SKILL.md -- returns '' if disabled (condition A) or not found.
+
+    Condition A never touches the filesystem under skills/ at all -- not even an
+    os.path.isfile check -- so disabled short-circuits before any I/O happens.
+    """
+    if not enabled:
+        tracer.log_skill_load(agent_name, rel_path, found=False, suppressed=True)
+        return ""
     full = os.path.join(_SKILLS_ROOT, rel_path + ".SKILL.md")
     found = os.path.isfile(full)
-    tracer.log_skill_load(agent_name, rel_path, found)
+    tracer.log_skill_load(agent_name, rel_path, found, suppressed=False)
     if found:
         with open(full) as f:
             return f.read()
@@ -215,10 +328,37 @@ _ENV_KNOWLEDGE = {
     "hpc":   "knowledge/lcrc",
 }
 
-def _env_knowledge(env: str, agent_name: str) -> str:
-    """Return the environment knowledge skill content for the given env."""
+# __ Condition-A substitute for env knowledge ___________________________________
+# B/C still load the real knowledge/local|lcrc skill file via _read_skill, unchanged.
+# A withholds that curated file but still gets these few lean, undiscoverable facts
+# (not technique -- just "what machine is this") so it isn't crippled by a different,
+# unrelated handicap. See knowledge/local.SKILL.md / knowledge/lcrc.SKILL.md for the
+# full curated version this is deliberately a stripped-down stand-in for.
+ENV_NOTES = {
+    "local": (
+        "Environment: a single local machine, no job scheduler. No PBS/LSF, no multi-node "
+        "MPI. /app/ paths are resolved to the repo root at runtime."
+    ),
+    "hpc": (
+        "Environment: an HPC cluster, presumably inside a job allocation. /app/ paths are "
+        "resolved to the repo root at runtime; never hardcode cluster-specific absolute paths."
+    ),
+}
+
+def _env_knowledge(env: str, agent_name: str, enabled: bool = True) -> str:
+    """Return environment-knowledge content for the given env.
+
+    enabled=True (condition B/C): reads the real knowledge/local|lcrc skill file, unchanged.
+    enabled=False (condition A): the skill file is suppressed (logged as such); a short
+    hardcoded ENV_NOTES substitute is returned instead of nothing.
+    """
     skill_key = _ENV_KNOWLEDGE.get(env, "knowledge/local")
-    return _read_skill(skill_key, agent_name)
+    if enabled:
+        return _read_skill(skill_key, agent_name, enabled=True)
+    # condition A: don't touch the filesystem at all -- _read_skill(enabled=False) already
+    # logs the suppression without any os.path/open call.
+    _read_skill(skill_key, agent_name, enabled=False)
+    return ENV_NOTES.get(env, ENV_NOTES["local"])
 
 def _slugify(path: str) -> str:
     """Turn a file path into a stable run-metadata id, e.g. for paper_id."""
@@ -266,6 +406,9 @@ def orchestrator(state: AgentState) -> dict:
         console.print(f"[dim yellow][orchestrator] revision counts -- {rev_str}[/dim yellow]")
 
     parts = [f"Goal: {state['goal']}", f"Current step: {state['current_step']}"]
+    if any(revisions.values()):
+        parts.append("Revision counts so far: " +
+                     ", ".join(f"{k}={v}" for k, v in revisions.items()))
     if state.get("literature_findings"):
         parts.append(f"Literature findings ({len(state['literature_findings'])} items):\n" +
                      "\n".join(f"  - {f}" for f in state["literature_findings"]))
@@ -288,16 +431,24 @@ def orchestrator(state: AgentState) -> dict:
             status_str = "OK" if entry.get("succeeded", False) else "FAILED"
             parts.append(f"  [{entry['tool']}] {status_str} - {entry.get('result', '')[:200]}")
 
-    # Build system prompt: base skill + env knowledge + available skill index + core prompt
-    _base = _read_skill("agents/orchestrator", "orchestrator")
-    _env_kn = _env_knowledge(state.get("env", "local"), "orchestrator")
-    _uc = _list_skills("use_cases")
-    _sys = _list_skills("systems")
-    _index = (f"\n\nAvailable skill contexts (set in skill_requests to load):"
-              f"\n  use_cases: {_uc}  -- request as \"use_cases/<name>/orchestrator\""
-              f"\n  systems:   {_sys}  -- request as \"systems/<name>\"") if (_uc or _sys) else ""
+    # Build system prompt: base skill + env knowledge + available skill index + core prompt.
+    # condition A (no-skills): _base comes back empty (suppressed) -> fall back to the
+    # separate, hand-written ORCHESTRATOR_SYSTEM_PROMPT_NO_SKILLS instead of the bare JSON-schema
+    # stub. _env_knowledge still gives condition A a lean substitute rather than nothing.
+    _enabled = state.get("condition", "B") != "A"
+    _base = _read_skill("agents/orchestrator", "orchestrator", enabled=_enabled)
+    _env_kn = _env_knowledge(state.get("env", "local"), "orchestrator", enabled=_enabled)
     _env_section = f"\n\n=== Environment Knowledge ===\n{_env_kn}" if _env_kn else ""
-    _sys_prompt = (_base + _env_section + _index + "\n\n---\n\n" + ORCHESTRATOR_SYSTEM_PROMPT) if _base else ORCHESTRATOR_SYSTEM_PROMPT
+
+    if _base:
+        _uc = _list_skills("use_cases")
+        _sys = _list_skills("systems")
+        _index = (f"\n\nAvailable skill contexts (set in skill_requests to load):"
+                  f"\n  use_cases: {_uc}  -- request as \"use_cases/<name>/orchestrator\""
+                  f"\n  systems:   {_sys}  -- request as \"systems/<name>\"") if (_uc or _sys) else ""
+        _sys_prompt = _base + _env_section + _index + "\n\n---\n\n" + ORCHESTRATOR_SYSTEM_PROMPT + "\n\n" + PROJECT_LAYOUT
+    else:
+        _sys_prompt = ORCHESTRATOR_SYSTEM_PROMPT_NO_SKILLS + _env_section + "\n\n" + PROJECT_LAYOUT
     _human = "\n\n".join(parts)
 
     result: OrchestratorOutput = _invoke_structured(model, OrchestratorOutput, [
@@ -307,7 +458,7 @@ def orchestrator(state: AgentState) -> dict:
 
     # Two-pass: if sub-skills requested, load them and re-invoke once
     if result.skill_requests:
-        _sub = "\n\n".join(filter(None, (_read_skill(r, "orchestrator") for r in result.skill_requests)))
+        _sub = "\n\n".join(filter(None, (_read_skill(r, "orchestrator", enabled=_enabled) for r in result.skill_requests)))
         if _sub:
             _enriched = _sys_prompt + f"\n\n=== Loaded Skills ===\n{_sub}\n\n(Final pass -- do not set skill_requests.)"
             result = _invoke_structured(model, OrchestratorOutput, [
@@ -392,16 +543,23 @@ def planner(state: AgentState) -> dict:
         feedback_section = (f"\n\nOrchestrator feedback -- address these issues before returning:\n{feedback}"
                             if feedback else "")
 
-        # Build system prompt: base skill + env knowledge + available skill index + core prompt
-        _base = _read_skill("agents/planner", "planner")
-        _env_kn = _env_knowledge(state.get("env", "local"), "planner")
-        _uc = _list_skills("use_cases")
-        _sys = _list_skills("systems")
-        _index = (f"\n\nAvailable skill contexts (set in skill_requests to load):"
-                  f"\n  use_cases: {_uc}  -- request as \"use_cases/<name>/planner\""
-                  f"\n  systems:   {_sys}  -- request as \"systems/<name>\"") if (_uc or _sys) else ""
+        # Build system prompt: base skill + env knowledge + available skill index + core prompt.
+        # condition A (no-skills): _base comes back empty (suppressed) -> fall back to the
+        # separate PLANNER_PROMPT_NO_SKILLS instead of the bare JSON-schema stub.
+        _enabled = state.get("condition", "B") != "A"
+        _base = _read_skill("agents/planner", "planner", enabled=_enabled)
+        _env_kn = _env_knowledge(state.get("env", "local"), "planner", enabled=_enabled)
         _env_section = f"\n\n=== Environment Knowledge ===\n{_env_kn}" if _env_kn else ""
-        _sys_prompt = (_base + _env_section + _index + "\n\n---\n\n" + PLANNER_PROMPT) if _base else PLANNER_PROMPT
+
+        if _base:
+            _uc = _list_skills("use_cases")
+            _sys = _list_skills("systems")
+            _index = (f"\n\nAvailable skill contexts (set in skill_requests to load):"
+                      f"\n  use_cases: {_uc}  -- request as \"use_cases/<name>/planner\""
+                      f"\n  systems:   {_sys}  -- request as \"systems/<name>\"") if (_uc or _sys) else ""
+            _sys_prompt = _base + _env_section + _index + "\n\n---\n\n" + PLANNER_PROMPT + "\n\n" + PROJECT_LAYOUT
+        else:
+            _sys_prompt = PLANNER_PROMPT_NO_SKILLS + _env_section + "\n\n" + PROJECT_LAYOUT
         _data_files = state.get("selected_data_files", [])
         _data_section = (f"\n\nAvailable input data files (in /app/data/):\n" +
                          "\n".join(f"  - {f}" for f in _data_files)) if _data_files else ""
@@ -430,7 +588,7 @@ def planner(state: AgentState) -> dict:
 
         # Two-pass: if sub-skills requested, load them and re-invoke once
         if result.skill_requests:
-            _sub = "\n\n".join(filter(None, (_read_skill(r, "planner") for r in result.skill_requests)))
+            _sub = "\n\n".join(filter(None, (_read_skill(r, "planner", enabled=_enabled) for r in result.skill_requests)))
             if _sub:
                 _enriched = _sys_prompt + f"\n\n=== Loaded Skills ===\n{_sub}\n\n(Final pass -- do not set skill_requests.)"
                 result = _invoke_structured(model, PlannerOutput, [
@@ -758,6 +916,7 @@ if __name__ == "__main__":
         "explorer_revisions":    0,
         "engine":                args.engine,
         "env":                   args.env,
+        "condition":             args.condition,
     }
 
     trace_path = os.path.join(runs_dir, _run_id + "_trace.json")

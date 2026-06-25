@@ -74,6 +74,7 @@ class SkillLoadEvent(BaseEvent):
     agent: str
     skill_path: str
     found: bool
+    suppressed: bool = False  # True when the file exists but condition A withheld its content
 
 
 class LLMCallEvent(BaseEvent):
