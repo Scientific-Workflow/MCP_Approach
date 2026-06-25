@@ -24,6 +24,7 @@ from langchain_core.tools import tool
 from rich.console import Console
 from trace_logger import tracer, extract_usage, message_to_dict
 from rich.panel import Panel
+from rich.syntax import Syntax
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -572,7 +573,30 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                 tool_args = tool_call["args"]
                 tool_id = tool_call["id"]
 
-                console.print(f"[dim cyan][explorer] calling tool: {tool_name}({json.dumps(tool_args, indent=2)[:200]})[/dim cyan]")
+                # Show the generated code/command in full so it's visible in the terminal.
+                # submit_task carries Python source in `python_code`; submit_shell_task /
+                # submit_mpi_task carry a shell `command`. Print these with syntax
+                # highlighting instead of truncating the whole args dict to 200 chars.
+                if tool_name == "submit_task" and "python_code" in tool_args:
+                    console.print(f"[bold cyan][explorer] calling tool: {tool_name} "
+                                  f"(name={tool_args.get('name', '?')})[/bold cyan]")
+                    console.print(Panel(
+                        Syntax(tool_args["python_code"], "python",
+                               theme="monokai", line_numbers=True, word_wrap=True),
+                        title=f"[bold]submit_task: {tool_args.get('name', '')}[/bold]",
+                        border_style="cyan",
+                    ))
+                elif tool_name in ("submit_shell_task", "submit_mpi_task") and "command" in tool_args:
+                    console.print(f"[bold cyan][explorer] calling tool: {tool_name} "
+                                  f"(name={tool_args.get('name', '?')})[/bold cyan]")
+                    console.print(Panel(
+                        Syntax(tool_args["command"], "bash",
+                               theme="monokai", word_wrap=True),
+                        title=f"[bold]{tool_name}: {tool_args.get('name', '')}[/bold]",
+                        border_style="cyan",
+                    ))
+                else:
+                    console.print(f"[dim cyan][explorer] calling tool: {tool_name}({json.dumps(tool_args, indent=2)[:200]})[/dim cyan]")
 
                 # Call MCP tool with timeout protection
                 try:

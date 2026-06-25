@@ -1,4 +1,5 @@
 numpy
 matplotlib
 Pillow
-mpi4py
+scipy
+adios2>=2.10
