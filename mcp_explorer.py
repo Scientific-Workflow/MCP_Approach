@@ -1,13 +1,9 @@
 """
-MCP Explorer Agent -- ReAct loop that calls workflow engine tools via MCP protocol.
+MCP Tool Box -- tool definitions and MCP client/session plumbing for the single
+agent's execution phase.
 
-The explorer receives tasks from the planner once the installer has finished
-preparing the local venv, then iteratively calls tools (exposed by the MCP server) to complete each task:
-submitting Python tasks, running shell commands, checking outputs, installing
-missing packages, and recovering from errors.
-
-The explorer doesn't know which workflow engine is behind the MCP server.
-It calls the same tools regardless of backend (Parsl, PyCOMPSs, ADIOS).
+The agent doesn't know which workflow engine is behind the MCP server. It calls
+the same tools regardless of backend (Parsl, PyCOMPSs, ADIOS).
 """
 
 import os
@@ -19,7 +15,7 @@ from typing import Optional
 from contextlib import AsyncExitStack
 
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import BaseMessage, ToolMessage
 from langchain_core.tools import tool
 from rich.console import Console
 from trace_logger import tracer, extract_usage, message_to_dict
@@ -43,18 +39,16 @@ ENGINE_SERVERS = {
 
 # __ LangChain Tool Wrappers __________________________________________________
 # These tools are bound to the LLM. When called, they delegate to the MCP session
-# stored in _mcp_session (set during the explorer's async run).
+# stored in _mcp_session (set during the execution loop's async run).
 
 _mcp_session: Optional[ClientSession] = None
-
-
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
     """Synchronously call an MCP tool via the active session.
-    
-    Uses the event loop from the explorer's async context to avoid
+
+    Uses the event loop from the execution loop's async context to avoid
     creating new threads/loops per call.
     """
     if _mcp_session is None:
@@ -67,9 +61,8 @@ def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
             return "\n".join(texts) if texts else "{}"
         return "{}"
 
-    # Use the explorer's event loop directly
+    # Use the execution loop's event loop directly
     if _event_loop and _event_loop.is_running():
-        # Schedule the coroutine on the running loop and wait for result
         future = asyncio.run_coroutine_threadsafe(_call(), _event_loop)
         return future.result(timeout=600)
     else:
@@ -81,41 +74,15 @@ def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
 _SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
 
 
-def _read_skill(rel_path: str, agent_name: str = "explorer", enabled: bool = True) -> str:
-    """Read skills/<rel_path>.SKILL.md -- returns '' if disabled (condition A) or not found.
-
-    Condition A never touches the filesystem under skills/ at all -- not even an
-    os.path.isfile check -- so disabled short-circuits before any I/O happens.
-    """
-    if not enabled:
-        tracer.log_skill_load(agent_name, rel_path, found=False, suppressed=True)
-        return ""
+def _read_skill(rel_path: str, agent_name: str = "single_agent") -> str:
+    """Read skills/<rel_path>.SKILL.md -- returns '' if not found."""
     full = os.path.join(_SKILLS_ROOT, rel_path + ".SKILL.md")
     found = os.path.isfile(full)
-    tracer.log_skill_load(agent_name, rel_path, found, suppressed=False)
+    tracer.log_skill_load(agent_name, rel_path, found)
     if found:
         with open(full) as f:
             return f.read()
     return ""
-
-
-# Set once per explorer run (see explorer()/_explorer_async) so the module-level
-# `load_skill` tool -- which the LLM calls with no access to AgentState -- can see
-# the current ablation condition.
-_current_condition: str = "B"
-
-# Mirrors agent_mcp.ENV_NOTES. Duplicated rather than imported to avoid a circular
-# import (agent_mcp imports `explorer` from this module).
-ENV_NOTES = {
-    "local": (
-        "Environment: a single local machine, no job scheduler. No PBS/LSF, no multi-node "
-        "MPI. /app/ paths are resolved to the repo root at runtime."
-    ),
-    "hpc": (
-        "Environment: an HPC cluster, presumably inside a job allocation. /app/ paths are "
-        "resolved to the repo root at runtime; never hardcode cluster-specific absolute paths."
-    ),
-}
 
 
 @tool
@@ -282,16 +249,11 @@ def load_skill(name: str) -> str:
     """
     if name not in _KNOWLEDGE_SKILLS:
         return f"Unknown skill '{name}'. Use 'local' or 'hpc'."
-    # condition B/C: read the real curated skill file, unchanged.
-    # condition A: the skill file is suppressed (never touched) -- return the same
-    # lean ENV_NOTES substitute used by the orchestrator/planner in this condition.
-    enabled = _current_condition != "A"
-    content = _read_skill(_KNOWLEDGE_SKILLS[name], enabled=enabled)
-    return content or ENV_NOTES.get(name, ENV_NOTES["local"])
+    return _read_skill(_KNOWLEDGE_SKILLS[name]) or f"No '{name}' knowledge file found."
 
 
-# All tools available to the explorer
-EXPLORER_TOOLS = [
+# All tools available during the execution phase
+EXECUTION_TOOLS = [
     submit_task, submit_shell_task,
     get_task_status, get_task_result, list_tasks,
     install_package, check_package,
@@ -300,136 +262,19 @@ EXPLORER_TOOLS = [
 ]
 
 
-# __ Explorer System Prompt ____________________________________________________
+# __ Execution loop (phase 3 of the single agent) ______________________________
 
-EXPLORER_SYSTEM_PROMPT = """\
-You are the Explorer agent in a scientific workflow reproduction system. Your job is to
-execute a computational workflow step by step using tools provided by a workflow engine
-MCP server.
+async def run_execution_loop(messages: list[BaseMessage], engine: str,
+                              agent_name: str = "single_agent",
+                              max_iterations: int = 150) -> tuple[list[BaseMessage], list[dict]]:
+    """Connect to the engine's MCP server and run a tool-calling ReAct loop,
+    extending the given (already populated) message transcript.
 
-You receive:
-- A list of tasks from the planner (what needs to be done)
-- Literature findings (scientific context from the paper)
-- Information about what software is installed in the venv
-
-Your goal: complete every task successfully by calling tools, observing results, and
-adapting your approach when things fail.
-
-## Available Tools
-
-| Tool | When to use |
-|---|---|
-| get_resources | **Call first.** Detects nodes/ranks/launcher (in_pbs true/false) |
-| load_skill | Load "local" or "hpc" environment knowledge -- pick ONE based on get_resources |
-| submit_task | Execute Python code (LAMMPS, OVITO, plotting, data processing) |
-| submit_shell_task | Run shell commands (cp, mkdir, ls, file operations) |
-| submit_mpi_task | Run an MPI-capable command (only if get_resources says in_pbs=true) |
-| get_task_status | Check if a previously submitted task is done |
-| get_task_result | Get full stdout/stderr from a completed task |
-| list_tasks | See all tasks and their statuses |
-| install_package | Install a missing pip package |
-| check_package | Verify a package is installed |
-| list_files | Check what files exist in a directory |
-| read_file | Inspect file contents |
-
-## Workflow
-
-1. Call get_resources first. Then call load_skill("hpc") if in_pbs is true, or
-   load_skill("local") if it is false -- load only the one that matches.
-2. Review the tasks list and plan your execution order
-3. Before running a task, check prerequisites (files exist, packages installed)
-4. Use submit_shell_task for file operations (copy, mkdir)
-5. Use submit_task for Python code (scientific computation, analysis, plotting)
-6. Use submit_mpi_task instead of submit_task/submit_shell_task for MPI-capable
-   executables, but only once get_resources has confirmed in_pbs=true
-7. After each task, verify output (list_files, read_file)
-8. If a task fails, diagnose and fix (install package, change code, retry)
-9. Track task IDs -- use depends_on when tasks have dependencies
-
-## Rules
-
-- Execute tasks in dependency order
-- Always verify output after each task
-- Max 3 retries per task before giving up -- then MOVE ON to the next task
-- Do NOT spend more than 3 attempts debugging any single issue (e.g. Qt rendering, display errors)
-- If a visualization/rendering task fails due to display/Qt/GUI issues, SKIP it and move to the next task
-- Use submit_task for Python code (ALL imports inside the script)
-- Use submit_shell_task for shell commands
-- Track task_ids from submit_task results for dependency chains
-- When all executable tasks are done, STOP and provide your final summary -- do not keep retrying failed tasks
-- Report what you accomplished and what failed in your final message
-
-## Scientific Integrity Rules (CRITICAL)
-
-- Do NOT generate synthetic, fake, or hardcoded data to simulate results from the paper
-- Do NOT fabricate timing data, performance benchmarks, or scaling measurements
-- Do NOT reproduce scaling plots, strong/weak scaling curves, or performance comparisons
-  that require HPC infrastructure (MPI, multi-node, PBS) unavailable in the current environment
-- ALL visualizations MUST use data produced by your own simulation runs in this session,
-  not values copied from the paper or invented to look plausible
-- If a task requires infrastructure you do not have (MPI, multi-node cluster, specific
-  HPC hardware), SKIP it and explain why in your summary
-- If the paper shows benchmark results on 40-1280 processes but you are running on a
-  single machine, do NOT simulate those benchmarks -- skip them
-- You CAN measure and plot actual single-machine timing of your own pipeline stages
-  (e.g. how long particle generation, analysis, and visualization took on this run)
-
-## Data Layout (MANDATORY -- do not deviate)
-
-NOTE: /app/ paths are automatically resolved to the local repo directory at runtime.
-You do not need an actual /app/ folder. Always use /app/ paths in your code --
-the MCP server translates them to the correct local paths.
-
-- Input data: /app/data/ (source files)
-- Working directory: /app/work/run0/ (ALL output goes here)
-- ALL output files, subdirectories, scripts, and results MUST be placed under /app/work/run0/
-- Use consistent subdirectory names:
-  - /app/work/run0/frames/       for simulation trajectory/frame output
-  - /app/work/run0/renders/      for visualization images and GIFs
-  - /app/work/run0/results.csv   for tabular analysis results
-  - /app/work/run0/workflow.py   for generated workflow scripts
-  - /app/work/run0/run_workflow.sh for launcher scripts
-- Do NOT create output directories with arbitrary names (no "output/", "decaf_workflow_output/", 
-  "smoketest/", etc.)
-- Do NOT write files to /tmp/ -- always use /app/work/run0/
-"""
-
-
-# __ Explorer Node _____________________________________________________________
-
-def explorer(state: dict) -> dict:
+    Unlike a fresh agent, `messages` arrives with the planning and install
+    phases already in it -- the system prompt plus however many turns those
+    phases produced. Context trimming below pins all of that and only slides
+    a window over the tool-calling turns added in this loop.
     """
-    Explorer node -- connects to MCP server and runs a ReAct tool-calling loop
-    to execute workflow tasks step by step.
-    """
-    global _mcp_session, _event_loop, _current_condition
-
-    _current_condition = state.get("condition", "B")
-    console.print("\n[dim cyan][explorer] starting interactive workflow execution...[/dim cyan]")
-    tracer.log_agent_start("explorer", {"engine": state.get("engine", "parsl")})
-    tracer.log_agent_input("explorer", {
-        "tasks_count": len(state.get("tasks", [])),
-        "findings_count": len(state.get("literature_findings", [])),
-        "engine": state.get("engine", "parsl"),
-    })
-
-    engine = state.get("engine", "parsl")
-    console.print(f"[dim cyan][explorer] connecting to {engine} MCP server...[/dim cyan]")
-
-    # Create a dedicated event loop for the MCP session
-    loop = asyncio.new_event_loop()
-    _event_loop = loop
-
-    try:
-        result = loop.run_until_complete(_explorer_async(state, engine))
-        return result
-    finally:
-        _event_loop = None
-        loop.close()
-
-
-async def _explorer_async(state: dict, engine: str) -> dict:
-    """Async implementation of the explorer -- keeps MCP session alive throughout."""
     global _mcp_session
 
     server_path = ENGINE_SERVERS.get(engine)
@@ -449,114 +294,45 @@ async def _explorer_async(state: dict, engine: str) -> dict:
     )
 
     async with AsyncExitStack() as stack:
-        # Connect to MCP server
         stdio_transport = await stack.enter_async_context(stdio_client(server_params))
         read_stream, write_stream = stdio_transport
         session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
         await session.initialize()
 
-        # Set global session so tools can use it
         _mcp_session = session
 
-        # List available tools
         tools_result = await session.list_tools()
         available = [t.name for t in tools_result.tools]
-        console.print(f"[dim cyan][explorer] MCP server tools: {available}[/dim cyan]")
-
-        # Build context from state
-        tasks = state.get("tasks", [])
-        findings = state.get("literature_findings", [])
-        stack_decision = state.get("stack_decision", [])
-
-        data_files = state.get("selected_data_files", [])
-
-        context_parts = []
-        if data_files:
-            context_parts.append("Available input data files (in /app/data/):\n" +
-                                 "\n".join(f"  - {f}" for f in data_files))
-        if findings:
-            context_parts.append("Literature findings:\n" +
-                                 "\n".join(f"  - {f}" for f in findings))
-        if stack_decision:
-            context_parts.append(f"Software stack in venv: {', '.join(stack_decision)}")
-        if tasks:
-            context_parts.append("Tasks to execute:\n" +
-                                 "\n".join(f"  {i+1}. {t}" for i, t in enumerate(tasks)))
-
-        # Load skill files -- condition A never touches skills/ at all, not even to list
-        # the use_cases/ directory, so the whole auto-detection block is skipped outright.
-        _enabled = state.get("condition", "B") != "A"
-        _base_skill = _read_skill("agents/explorer", enabled=_enabled)
-        _uc_skill = ""
-        if _enabled:
-            # Auto-detect use case: scan all use_cases/*/explorer.SKILL.md files,
-            # check if their description matches any package in stack_decision.
-            # This replaces the hardcoded 'if "lammps"' check.
-            _stack_lower = [p.lower() for p in stack_decision]
-            _uc_dir = os.path.join(_SKILLS_ROOT, "use_cases")
-            if os.path.isdir(_uc_dir):
-                for uc_name in os.listdir(_uc_dir):
-                    content = _read_skill(f"use_cases/{uc_name}/explorer")
-                    if not content:
-                        continue
-                    # Match if any stack package appears in the skill file description
-                    desc_lower = content[:500].lower()
-                    if any(pkg in desc_lower for pkg in _stack_lower):
-                        _uc_skill = content
-                        console.print(f"[dim cyan][explorer] loaded use case skill: {uc_name}[/dim cyan]")
-                        break
-
-        system_prompt = EXPLORER_SYSTEM_PROMPT
-        if _base_skill:
-            system_prompt = _base_skill + "\n\n---\n\n" + system_prompt
-        if _uc_skill:
-            system_prompt += "\n\n--- Use Case Context ---\n\n" + _uc_skill
-
-        feedback = state.get("orchestrator_feedback", "")
-        if feedback:
-            context_parts.append(f"\nOrchestrator feedback -- address these issues:\n{feedback}")
-
-        human_message = "\n\n".join(context_parts)
+        console.print(f"[dim cyan][single_agent] MCP server tools: {available}[/dim cyan]")
 
         console.print(Panel(
-            f"[bold]Tasks:[/bold] {len(tasks)}\n"
-            f"[bold]Findings:[/bold] {len(findings)}\n"
-            f"[bold]Engine:[/bold] {engine}",
-            title="[bold cyan]Explorer Starting[/bold cyan]",
+            f"[bold]Engine:[/bold] {engine}\n[bold]Transcript so far:[/bold] {len(messages)} messages",
+            title="[bold cyan]Execution Phase Starting[/bold cyan]",
             border_style="cyan",
         ))
 
-        # Initialize LLM with tool binding
         llm = ChatOpenAI(
             model=os.getenv("CODER_MODEL_NAME", os.getenv("MODEL_NAME", "claudesonnet46")),
         )
-        llm_with_tools = llm.bind_tools(EXPLORER_TOOLS)
+        llm_with_tools = llm.bind_tools(EXECUTION_TOOLS)
 
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=human_message),
-        ]
-
-        # ReAct loop
-        # LLM calls are sync (blocking), tool calls go through MCP async session.
-        # We run LLM in a thread to avoid blocking the event loop.
-        max_iterations = 100
-        exploration_log = []
+        exploration_log: list[dict] = []
         iteration = 0
 
         _MAX_TOOL_RESULT_CHARS = 8_000  # cap per tool result added to messages
-        _CONTEXT_WINDOW        = 20     # message slots kept beyond system + human
+        _CONTEXT_WINDOW        = 20     # message slots kept beyond the pinned prefix
+        _pinned_len            = len(messages)  # system + planning + install turns, never trimmed
 
         for iteration in range(max_iterations):
-            console.print(f"\n[dim yellow][explorer] iteration {iteration + 1}/{max_iterations}[/dim yellow]")
+            console.print(f"\n[dim yellow][single_agent] execution iteration {iteration + 1}/{max_iterations}[/dim yellow]")
 
-            # Trim context window: keep system + human + last _CONTEXT_WINDOW messages.
+            # Trim context window: keep the pinned prefix + last _CONTEXT_WINDOW messages.
             # Scan forward past any leading ToolMessages to avoid orphaned tool results.
-            if len(messages) > 2 + _CONTEXT_WINDOW:
+            if len(messages) > _pinned_len + _CONTEXT_WINDOW:
                 tail = messages[-_CONTEXT_WINDOW:]
                 start = next((i for i, m in enumerate(tail) if not isinstance(m, ToolMessage)), 0)
-                messages = messages[:2] + tail[start:]
-                console.print(f"[dim yellow][explorer] context trimmed to {len(messages)} messages[/dim yellow]")
+                messages = messages[:_pinned_len] + tail[start:]
+                console.print(f"[dim yellow][single_agent] context trimmed to {len(messages)} messages[/dim yellow]")
 
             # Run LLM call in a thread (it's sync/blocking)
             _t0 = time.time()
@@ -566,7 +342,7 @@ async def _explorer_async(state: dict, engine: str) -> dict:
             _model_name = getattr(llm, "model_name", None) or os.getenv(
                 "CODER_MODEL_NAME", os.getenv("MODEL_NAME", ""))
             tracer.log_llm_call(
-                "explorer", _model_name,
+                agent_name, _model_name,
                 [message_to_dict(m) for m in messages],
                 response.content if hasattr(response, "content") else str(response),
                 tool_calls=response.tool_calls or [],
@@ -575,16 +351,15 @@ async def _explorer_async(state: dict, engine: str) -> dict:
             )
             messages.append(response)
 
-            usage = extract_usage(response)
-            if usage:
-                tracer.log_token_usage("explorer", usage["input_tokens"],
-                                       usage["output_tokens"], usage["total_tokens"],
+            if _usage:
+                tracer.log_token_usage(agent_name, _usage["input_tokens"],
+                                       _usage["output_tokens"], _usage["total_tokens"],
                                        model=getattr(llm, "model_name", ""))
 
             if not response.tool_calls:
                 console.print(Panel(
                     response.content[:3000] if response.content else "(no content)",
-                    title="[bold green]Explorer Complete[/bold green]",
+                    title="[bold green]Execution Complete[/bold green]",
                     border_style="green",
                 ))
                 break
@@ -595,14 +370,14 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                 tool_args = tool_call["args"]
                 tool_id = tool_call["id"]
 
-                console.print(f"[dim cyan][explorer] calling tool: {tool_name}({json.dumps(tool_args, indent=2)[:200]})[/dim cyan]")
+                console.print(f"[dim cyan][single_agent] calling tool: {tool_name}({json.dumps(tool_args, indent=2)[:200]})[/dim cyan]")
 
                 # load_skill is client-side (reads local skill files via _read_skill) --
                 # no MCP server implements it as a tool, so it must run locally rather
                 # than being forwarded to session.call_tool like every other tool below.
                 if tool_name == "load_skill":
                     tool_result = load_skill.invoke(tool_args)
-                    console.print(f"[green][explorer] {tool_name} -> loaded locally[/green]")
+                    console.print(f"[green][single_agent] {tool_name} -> loaded locally[/green]")
                     exploration_log.append({
                         "iteration": iteration + 1,
                         "tool": tool_name,
@@ -610,7 +385,7 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                         "result": tool_result[:2000],
                         "succeeded": True,
                     })
-                    tracer.log_tool_call("explorer", tool_name, tool_args, tool_result,
+                    tracer.log_tool_call(agent_name, tool_name, tool_args, tool_result,
                                          True, iteration=iteration + 1)
                     messages.append(ToolMessage(
                         content=tool_result[:_MAX_TOOL_RESULT_CHARS],
@@ -634,13 +409,13 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                         "error": f"Tool call timed out after 1800s",
                         "status": "timeout",
                     })
-                    console.print(f"[bold red][explorer] {tool_name} timed out -- skipping[/bold red]")
+                    console.print(f"[bold red][single_agent] {tool_name} timed out -- skipping[/bold red]")
                 except (BrokenPipeError, ConnectionError, EOFError) as e:
                     tool_result = json.dumps({
                         "error": f"MCP connection lost: {e}",
                         "status": "connection_lost",
                     })
-                    console.print(f"[bold red][explorer] MCP connection lost -- ending exploration[/bold red]")
+                    console.print(f"[bold red][single_agent] MCP connection lost -- ending execution[/bold red]")
                     mcp_broken = True
                 except Exception as e:
                     tool_result = json.dumps({"error": str(e)})
@@ -720,10 +495,10 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                 exploration_log.append(log_entry)
 
                 color = "green" if tool_succeeded else "red"
-                console.print(f"[{color}][explorer] {tool_name} -> {display_status}[/{color}]")
+                console.print(f"[{color}][single_agent] {tool_name} -> {display_status}[/{color}]")
 
                 # Log to trace (full result, not truncated -- needed for debugging failed runs)
-                tracer.log_tool_call("explorer", tool_name, tool_args,
+                tracer.log_tool_call(agent_name, tool_name, tool_args,
                                      tool_result, tool_succeeded, iteration=iteration + 1)
 
                 messages.append(ToolMessage(
@@ -737,14 +512,14 @@ async def _explorer_async(state: dict, engine: str) -> dict:
 
             # If MCP connection is broken, stop the iteration loop
             if mcp_broken:
-                console.print("[bold yellow][explorer] MCP connection lost -- ending with partial results[/bold yellow]")
+                console.print("[bold yellow][single_agent] MCP connection lost -- ending with partial results[/bold yellow]")
                 break
 
         else:
-            console.print("[bold red][explorer] hit max iterations limit[/bold red]")
+            console.print("[bold red][single_agent] hit max iterations limit[/bold red]")
 
         # Cleanup MCP server
-        console.print("[dim cyan][explorer] cleaning up MCP server...[/dim cyan]")
+        console.print("[dim cyan][single_agent] cleaning up MCP server...[/dim cyan]")
         try:
             await session.call_tool("cleanup", {})
         except Exception:
@@ -758,11 +533,11 @@ async def _explorer_async(state: dict, engine: str) -> dict:
         failures = total_calls - successes
 
         summary = (
-            f"Explorer completed: {total_calls} tool calls, "
+            f"Execution complete: {total_calls} tool calls, "
             f"{successes} succeeded, {failures} failed, "
             f"{iteration + 1} iterations"
         )
-        console.print(f"[dim cyan][explorer] {summary}[/dim cyan]")
+        console.print(f"[dim cyan][single_agent] {summary}[/dim cyan]")
 
         # Record what was actually produced -- supports tier-1/tier-3 scoring
         # directly from the trace without re-deriving it from tool-call text.
@@ -779,15 +554,21 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                     artifacts.append({"path": full, "size_bytes": size_bytes})
         tracer.log_artifact_manifest(artifacts)
 
-        tracer.log_agent_output("explorer", {
-            "total_tool_calls": total_calls,
-            "successes": successes,
-            "failures": failures,
-            "iterations": iteration + 1,
-        })
-        tracer.log_agent_end("explorer")
+        return messages, exploration_log
 
-        return {
-            "exploration_log": exploration_log,
-            "current_step": "explorer_complete",
-        }
+
+def run_execution_loop_sync(messages: list[BaseMessage], engine: str,
+                             agent_name: str = "single_agent",
+                             max_iterations: int = 150) -> tuple[list[BaseMessage], list[dict]]:
+    """Sync wrapper around run_execution_loop -- owns the dedicated event loop
+    the MCP session needs for its lifetime."""
+    global _event_loop
+    loop = asyncio.new_event_loop()
+    _event_loop = loop
+    try:
+        return loop.run_until_complete(
+            run_execution_loop(messages, engine, agent_name, max_iterations)
+        )
+    finally:
+        _event_loop = None
+        loop.close()

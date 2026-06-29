@@ -1,4 +1,6 @@
+ovito
+parsl
 numpy
 matplotlib
-adios2
-ovito
+Pillow
+mpi4py

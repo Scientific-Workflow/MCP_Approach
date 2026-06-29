@@ -48,10 +48,10 @@ No conda, no `module load anaconda3`. The venv is the execution environment.
 
 ## Resource Awareness
 
-The explorer must call `get_resources` as its **first tool call**. If `in_pbs`
-is `false` in the response, stop immediately and tell the user to start a PBS
-interactive job before re-running the agent. Do not attempt any compute task
-outside a PBS allocation on LCRC.
+You must call `get_resources` as your **first tool call** once the execution
+phase starts. If `in_pbs` is `false` in the response, stop immediately and tell
+the user to start a PBS interactive job before re-running the agent. Do not
+attempt any compute task outside a PBS allocation on LCRC.
 
 The server reads these PBS variables:
 
@@ -104,7 +104,7 @@ For Parsl config, load the `systems/parsl` skill — the HPC PBS config (scaled 
 
 Store the project repo and venv under `/lcrc/project/`.
 
-**In task code and planner task lists, always use `/app/` paths** — the MCP server
+**In task code and your task list, always use `/app/` paths** — the MCP server
 resolves them to the actual repo location automatically. Never write `/lcrc/project/`
 or any absolute cluster path in task instructions or Python code.
 

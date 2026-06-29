@@ -1,12 +1,17 @@
 """
-MCP Approach -- Multi-Agent Workflow (Tool-Calling Mode)
+MAW Single-Agent Pipeline (Condition C)
 
-This is the MCP approach entry point. Instead of generating a complete workflow script
-(codegen) and executing it (executor), this approach uses an explorer agent that
-interactively calls tools to execute each workflow task step by step in a local venv.
+One agent works through a single, continuous, growing conversation in three
+phases: read the paper and decide what to build (planning), install the
+decided stack (deterministic, no LLM call), then execute every task via
+MCP tool calls against a workflow-engine server (execution). Tool-calling is
+only available in the execution phase -- planning is structured-output only,
+and there is no separate approval step before installing.
 
-Pipeline:
-    orchestrator -> planner -> installer -> explorer -> end
+This repo exists solely to run this single-agent variant -- Condition C of
+the ablation in maw_evaluation_plan.md. The sibling repo MCP_Approach runs
+the four-role orchestrator/planner/installer/explorer pipeline for
+conditions A and B.
 
 Usage:
     python agent_mcp.py --paper 1 --goal "Reproduce this workflow..."
@@ -17,13 +22,13 @@ import os
 import base64
 import json
 import mimetypes
-import operator
 import re
 import subprocess
+import sys
 import time
 import warnings
 from datetime import datetime
-from typing import Annotated, Literal, Sequence
+from typing import Annotated, Sequence
 from typing_extensions import TypedDict
 from pydantic import BaseModel
 from pypdf import PdfReader
@@ -32,18 +37,16 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
-from mcp_explorer import explorer
+from mcp_explorer import run_execution_loop_sync
 from trace_logger import tracer, extract_usage, message_to_dict
 
 load_dotenv()
 
 console = Console()
-
-_run_log_path: str = "" # path for logging run-level events in JSONL format; only in orchestrator to record routing decisions
 
 
 # __ LLM ______________________________________________________________________
@@ -59,121 +62,47 @@ class AgentState(TypedDict):
     literature_findings:   list[str]
     stack_decision:        list[str]
     tasks:                 list[str]
-    exploration_log:       list[dict]       # explorer output (tool call records)
+    exploration_log:       list[dict]       # execution-phase tool call records
     selected_data_files:   list[str]        # filenames chosen from data/ at startup
     requirements_content:  str
-    requirements_approved: bool
     image_path:            str              # path to user-uploaded image for planning (optional)
     current_step:          str
-    orchestrator_feedback: str
-    next:                  str
-    planner_revisions:     int
-    installer_revisions:   int
-    explorer_revisions:    int
     engine:                str              # workflow engine: "parsl", "pycompss", etc.
     env:                   str              # execution environment: "local" or "hpc"
-    condition:              str             # ablation condition: "A" (no-skills), "B" (full), "C" (single-agent)
 
 
 # __ Pydantic Schemas __________________________________________________________
 
-class OrchestratorOutput(BaseModel):
-    reasoning:           str
-    next:                  Literal["planner", "installer", "explorer", "end"]
-    feedback:              str
-    requirements_approved: bool = False
-    skill_requests:        list[str] = []
-
-class PlannerOutput(BaseModel):
+class PlanOutput(BaseModel):
     literature_findings: list[str]
     stack_decision:      list[str]
     tasks:               list[str]
     skill_requests:      list[str] = []
 
-class InstallerOutput(BaseModel):
-    requirements_content: str
 
+# __ Agent Prompt ______________________________________________________________
 
-# __ Agent Prompts _____________________________________________________________
-
-ORCHESTRATOR_SYSTEM_PROMPT = """\
+SINGLE_AGENT_SYSTEM_PROMPT = """\
 Your agent skill file contains your full operating instructions. Follow them.
 
-Return ONLY a valid JSON object with exactly these keys:
-- reasoning:           str -- your analysis of the current state
-- next:                "planner" | "installer" | "explorer" | "end"
-- feedback:            str -- specific actionable feedback for the receiving agent, or "" if proceeding normally
-- requirements_approved: bool -- true ONLY when approving pending requirements.txt, false in all other cases
-- skill_requests:      list[str] -- skill paths to load (first call only; empty on subsequent calls)
-\
-"""
+You work through this task in three phases, in a single continuous conversation:
 
-# __ Condition-A (no-skills) prompt -- separate, hand-written, never derived from the skill files __
-# Per the eval plan: condition A's system prompt contains role definitions, tool/agent catalogs,
-# and task framing only -- no procedural heuristics. This is an isolated constant on purpose
-# (see memory: add new isolated files/constants per use case rather than editing shared ones).
-ORCHESTRATOR_SYSTEM_PROMPT_NO_SKILLS = """\
-You are the supervisor orchestrator for a scientific workflow reproduction system. You coordinate
-specialized agents to reproduce a computational workflow from a research paper in a local venv
-environment. After each agent completes, you review its output and decide where to route next.
+1. PLANNING -- you'll be given the paper text and a goal. Respond with ONLY a
+   valid JSON object with exactly these keys:
+   - literature_findings: list[str] -- specific, quantitative facts extracted from the paper
+   - stack_decision:      list[str] -- packages to install into the local venv
+   - tasks:               list[str] -- ordered, Python-API-level implementation steps
+   - skill_requests:      list[str] -- skill paths to load (first call only; empty on subsequent calls)
+   No markdown, no code fences, no explanation outside the JSON. No tools are available
+   in this phase -- your stack_decision is final, there is no separate approval step.
 
-This is the MCP (tool-calling) approach: instead of generating a complete workflow script, the
-explorer agent executes each task interactively via tool calls against a workflow-engine MCP server.
+2. INSTALL -- handled automatically from your stack_decision, no action needed from you.
+   You'll see a report of what was installed before the next phase starts.
 
-## Agents Available
-
-| Agent | What it does |
-|---|---|
-| `planner` | Reads the PDF, extracts literature findings, dependency stack, and ordered tasks |
-| `installer` | Sets up the local venv (two-phase: requirements.txt -> pip install) |
-| `explorer` | Executes workflow tasks step by step using tool calls in the local venv |
-| `end` | Signals successful completion |
-
-General flow: planner -> installer -> explorer -> end.
-
-## Two-Phase Installer Protocol
-
-The installer runs in two phases requiring your explicit sign-off:
-- Phase 1: it generates requirements.txt and stops; `current_step` becomes
-  `"installer_requirements_pending_approval"`.
-- Phase 2: it runs `pip install`, but only once you set `requirements_approved=true`.
-
-When `current_step == "installer_requirements_pending_approval"`, decide `requirements_approved`
-by reviewing the `requirements_content` in the state below. In every other situation,
-`requirements_approved` must be `false`.
-
-## State Fields Available to You
-
-| Field | Source | Notes |
-|---|---|---|
-| `goal` | initial | The user's goal |
-| `current_step` | updated each node | What just completed |
-| `literature_findings` | planner | Key findings from the paper |
-| `stack_decision` | planner | Required packages |
-| `tasks` | planner | Ordered implementation steps |
-| `requirements_content` | installer phase 1 | requirements.txt content -- review before approving |
-| `exploration_log` | explorer | Tool call records (accumulated list of dicts) |
-| `planner_revisions` / `installer_revisions` / `explorer_revisions` | orchestrator | Retry counts |
-
-Return ONLY a valid JSON object with exactly these keys:
-- reasoning:           str -- your analysis of the current state
-- next:                "planner" | "installer" | "explorer" | "end"
-- feedback:            str -- specific actionable feedback for the receiving agent, or "" if proceeding normally
-- requirements_approved: bool -- true ONLY when approving pending requirements.txt, false in all other cases
-- skill_requests:      list[str] -- always leave this empty; no skill content is available in this run
-\
-"""
-
-PLANNER_PROMPT = """\
-Your agent skill file contains your full operating instructions. Follow them.
-
-Return ONLY a valid JSON object with exactly these keys:
-- literature_findings: list[str] -- specific, quantitative facts extracted from the paper
-- stack_decision:      list[str] -- packages to install into the local venv
-- tasks:               list[str] -- ordered, Python-API-level implementation steps
-- skill_requests:      list[str] -- skill paths to load (first call only; empty on subsequent calls)
-
-No markdown, no code fences, no explanation outside the JSON.
+3. EXECUTION -- you'll be given tools and the task list. Call tools to execute every
+   task, observing results and adapting as you go. There is no separate reviewer to
+   tell you when to stop: when every task is done (or deliberately skipped, with
+   justification), stop calling tools and give a final summary.
 
 IMPORTANT CONSTRAINTS ON TASKS:
 - Do NOT include tasks to reproduce performance benchmarks, scaling plots, or timing
@@ -186,65 +115,18 @@ IMPORTANT CONSTRAINTS ON TASKS:
   from the paper.
 - Follow the environment knowledge injected into your context (local or HPC) for
   what parallelism, MPI, and job launcher commands are appropriate.
-
-HANDLING ORCHESTRATOR FEEDBACK:
-If the input ends with "Orchestrator feedback", fix every issue raised before returning.\
-"""
-
-# __ Condition-A (no-skills) prompt -- separate, hand-written, never derived from the skill files __
-# Same isolation rule as ORCHESTRATOR_SYSTEM_PROMPT_NO_SKILLS above.
-PLANNER_PROMPT_NO_SKILLS = """\
-You are a scientific workflow analyst. Given the full text of a research paper and a goal, extract
-everything needed to reproduce the computational workflow described in the paper.
-
-## What Tasks Are in the MCP Approach
-
-Tasks describe what the explorer agent executes via MCP tool calls -- not code to write to a file
-and run. There is no workflow.py, no main(), no bash launcher, no @python_app definitions. The
-explorer calls `submit_task` with inline Python code directly, or a domain-specific tool when the
-goal names one (e.g. a simulation runner).
-
-## Software Available
-
-Depending on the workflow, packages such as LAMMPS, OVITO, Parsl, PyCOMPSs, ADIOS2, numpy, and
-matplotlib may be installed or installable into the local venv. Only request packages that are
-actually needed for this paper's workflow -- never invent packages.
-
-Return ONLY a valid JSON object with exactly these keys:
-- literature_findings: list[str] -- specific, quantitative facts extracted from the paper
-- stack_decision:      list[str] -- packages to install into the local venv
-- tasks:               list[str] -- ordered, Python-API-level implementation steps the explorer will execute
-- skill_requests:      list[str] -- always leave this empty; no skill content is available in this run
-
-No markdown, no code fences, no explanation outside the JSON.
-
-IMPORTANT CONSTRAINTS ON TASKS:
-- Do NOT include tasks to reproduce performance benchmarks, scaling plots, or timing
-  comparisons from the paper unless the environment knowledge confirms the resources exist.
-- Do NOT include tasks that fabricate or simulate fake benchmark data to mimic the
-  paper's performance results.
-- DO include tasks that reproduce the actual scientific computation (simulation,
-  analysis, visualization) using data generated by the workflow itself.
-- All visualizations must use data produced by the workflow, not hardcoded values
-  from the paper.
-- Follow the environment knowledge injected into your context (local or HPC) for
-  what parallelism, MPI, and job launcher commands are appropriate.
-
-HANDLING ORCHESTRATOR FEEDBACK:
-If the input ends with "Orchestrator feedback", fix every issue raised before returning.\
+\
 """
 
 
 # __ Project layout (injected into context) ____________________________________
-######################################################################## Project layout -- this is injected into the system prompt for all agents, so they understand where to read/write files and how the repo maps to runtime paths. Update as needed for your project. ################################################################
 
 PROJECT_LAYOUT = """\
 Repo directory tree -- the repo root is mapped to /app/ at runtime:
 
 /app/                                  <- repo root
-+-- agent_mcp.py                       <- orchestrator/planner/installer + graph
-+-- mcp_tools.py
-+-- mcp_explorer.py                    <- explorer agent (ReAct loop, MCP client)
++-- agent_mcp.py                       <- single-agent pipeline + graph
++-- mcp_explorer.py                    <- MCP tool definitions + session/loop plumbing
 +-- servers/                           <- MCP server backends, one per workflow engine
 |   +-- parsl_server.py
 |   +-- pycompss_server.py
@@ -259,14 +141,12 @@ Repo directory tree -- the repo root is mapped to /app/ at runtime:
 |   +-- *.pdf
 +-- images/
 |   +-- *.png / *.jpg                  <- optional planning diagrams/figures
-+-- builds/                            <- installer-generated requirements
-|   +-- requirements.txt               <- venv package list
-+-- work/                              <- explorer output goes here
++-- builds/
+|   +-- requirements.txt               <- venv package list, written during the install phase
++-- work/                              <- execution-phase output goes here
     +-- run0/                          <- default working directory
 \
 """
-
-HOST_REPO_PATH = os.environ.get("HOST_REPO_PATH", os.path.dirname(os.path.abspath(__file__)))
 
 
 # __ Structured output helper __________________________________________________
@@ -302,22 +182,14 @@ def _invoke_structured(llm, schema, messages, agent_name, retries=5):
 
 
 # __ Skill file helpers ________________________________________________________
-############################################################################# SKILL FILE MANAGEMENT: read .SKILL.md files for orchestrator and planner, with support for sub-skill requests #################################
 
 _SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
 
-def _read_skill(rel_path: str, agent_name: str, enabled: bool = True) -> str:
-    """Read skills/<rel_path>.SKILL.md -- returns '' if disabled (condition A) or not found.
-
-    Condition A never touches the filesystem under skills/ at all -- not even an
-    os.path.isfile check -- so disabled short-circuits before any I/O happens.
-    """
-    if not enabled:
-        tracer.log_skill_load(agent_name, rel_path, found=False, suppressed=True)
-        return ""
+def _read_skill(rel_path: str, agent_name: str = "single_agent") -> str:
+    """Read skills/<rel_path>.SKILL.md -- returns '' if not found."""
     full = os.path.join(_SKILLS_ROOT, rel_path + ".SKILL.md")
     found = os.path.isfile(full)
-    tracer.log_skill_load(agent_name, rel_path, found, suppressed=False)
+    tracer.log_skill_load(agent_name, rel_path, found)
     if found:
         with open(full) as f:
             return f.read()
@@ -328,44 +200,11 @@ _ENV_KNOWLEDGE = {
     "hpc":   "knowledge/lcrc",
 }
 
-# __ Condition-A substitute for env knowledge ___________________________________
-# B/C still load the real knowledge/local|lcrc skill file via _read_skill, unchanged.
-# A withholds that curated file but still gets these few lean, undiscoverable facts
-# (not technique -- just "what machine is this") so it isn't crippled by a different,
-# unrelated handicap. See knowledge/local.SKILL.md / knowledge/lcrc.SKILL.md for the
-# full curated version this is deliberately a stripped-down stand-in for.
-ENV_NOTES = {
-    "local": (
-        "Environment: a single local machine, no job scheduler. No PBS/LSF, no multi-node "
-        "MPI. /app/ paths are resolved to the repo root at runtime."
-    ),
-    "hpc": (
-        "Environment: an HPC cluster, presumably inside a job allocation. /app/ paths are "
-        "resolved to the repo root at runtime; never hardcode cluster-specific absolute paths."
-    ),
-}
-
-def _env_knowledge(env: str, agent_name: str, enabled: bool = True) -> str:
-    """Return environment-knowledge content for the given env.
-
-    enabled=True (condition B/C): reads the real knowledge/local|lcrc skill file, unchanged.
-    enabled=False (condition A): the skill file is suppressed (logged as such); a short
-    hardcoded ENV_NOTES substitute is returned instead of nothing.
-    """
-    skill_key = _ENV_KNOWLEDGE.get(env, "knowledge/local")
-    if enabled:
-        return _read_skill(skill_key, agent_name, enabled=True)
-    # condition A: don't touch the filesystem at all -- _read_skill(enabled=False) already
-    # logs the suppression without any os.path/open call.
-    _read_skill(skill_key, agent_name, enabled=False)
-    return ENV_NOTES.get(env, ENV_NOTES["local"])
-
 def _slugify(path: str) -> str:
     """Turn a file path into a stable run-metadata id, e.g. for paper_id."""
     base = os.path.splitext(os.path.basename(path))[0] if path else "no_paper"
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", base).strip("_")
     return slug or "no_paper"
-
 
 def _list_skills(folder: str) -> list:
     """List available names in skills/<folder>/: subdirectory names AND .SKILL.md base names."""
@@ -377,393 +216,216 @@ def _list_skills(folder: str) -> list:
         if os.path.isdir(os.path.join(d, name)):
             results.append(name)
         elif name.endswith(".SKILL.md"):
-            results.append(os.path.splitext(name)[0])
+            results.append(name[: -len(".SKILL.md")])
     return results
 
 
-# __ Nodes _____________________________________________________________________
+# __ Install helper (phase 2 -- deterministic, no LLM call, no tools) __________
 
-############################################################################# ORCHESTRATOR ##############################################################
+def _install_stack(stack: list[str]) -> tuple[bool, str]:
+    """Write builds/requirements.txt from `stack` and pip install it into the
+    current venv. No approval gate: the agent's own phase-1 decision is final."""
+    build_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "builds")
+    os.makedirs(build_dir, exist_ok=True)
+    requirements_path = os.path.join(build_dir, "requirements.txt")
 
-def orchestrator(state: AgentState) -> dict:
-    console.print("\n[dim cyan][orchestrator] reviewing state...[/dim cyan]")
-    tracer.log_agent_start("orchestrator")         ########### insert TRACER ##########
-    tracer.log_agent_input("orchestrator", {       ########### insert TRACER ##########
-        "current_step": state.get("current_step", ""),
-        "goal": state.get("goal", ""),
-        "has_findings": bool(state.get("literature_findings")),
-        "has_tasks": bool(state.get("tasks")),
-        "has_exploration_log": bool(state.get("exploration_log")),
-    })
+    packages = [pkg for pkg in stack if pkg]
+    content = ("\n".join(packages) + "\n") if packages else ""
+    with open(requirements_path, "w") as f:
+        f.write(content)
 
-    revisions = {
-        "planner":   state.get("planner_revisions",   0),
-        "installer": state.get("installer_revisions", 0),
-        "explorer":  state.get("explorer_revisions",  0),
-    }
-    if any(revisions.values()):
-        rev_str = " | ".join(f"{k}: {v}" for k, v in revisions.items() if v > 0)
-        console.print(f"[dim yellow][orchestrator] revision counts -- {rev_str}[/dim yellow]")
+    if not packages:
+        console.print("[dim cyan][install] no packages to install[/dim cyan]")
+        return True, "No packages in stack_decision -- nothing to install."
 
-    parts = [f"Goal: {state['goal']}", f"Current step: {state['current_step']}"]
-    if any(revisions.values()):
-        parts.append("Revision counts so far: " +
-                     ", ".join(f"{k}={v}" for k, v in revisions.items()))
-    if state.get("literature_findings"):
-        parts.append(f"Literature findings ({len(state['literature_findings'])} items):\n" +
-                     "\n".join(f"  - {f}" for f in state["literature_findings"]))
-    if state.get("stack_decision"):
-        parts.append(f"Stack: {state['stack_decision']}")
-    if state.get("tasks"):
-        parts.append(f"Tasks ({len(state['tasks'])}):\n" +
-                     "\n".join(f"  {i+1}. {t}" for i, t in enumerate(state["tasks"])))
-    if state.get("requirements_content"):
-        parts.append(f"requirements.txt:\n{state['requirements_content']}")
-    if state.get("exploration_log"):
-        # Summarize exploration log for orchestrator
-        log = state["exploration_log"]
-        total = len(log)
-        successes = sum(1 for e in log if e.get("succeeded", False))
-        failures = total - successes
-        parts.append(f"Exploration: {total} tool calls, {successes} succeeded, {failures} failed")
-        # Include last few entries for detail
-        for entry in log[-5:]:
-            status_str = "OK" if entry.get("succeeded", False) else "FAILED"
-            parts.append(f"  [{entry['tool']}] {status_str} - {entry.get('result', '')[:200]}")
+    console.print(f"[dim cyan][install] pip installing {len(packages)} packages...[/dim cyan]")
+    proc = subprocess.run(
+        [sys.executable, "-m", "pip", "install"] + packages,
+        capture_output=True, text=True, timeout=600,
+    )
+    if proc.returncode != 0:
+        console.print(f"[yellow][install] pip stderr:\n{proc.stderr[-2000:]}[/yellow]")
+        return False, (
+            f"Install FAILED for: {', '.join(packages)}\n"
+            f"pip stderr (tail):\n{proc.stderr[-2000:]}"
+        )
+    console.print("[dim cyan][install] packages ready[/dim cyan]")
+    return True, f"Installed {len(packages)} packages successfully: {', '.join(packages)}"
 
-    # Build system prompt: base skill + env knowledge + available skill index + core prompt.
-    # condition A (no-skills): _base comes back empty (suppressed) -> fall back to the
-    # separate, hand-written ORCHESTRATOR_SYSTEM_PROMPT_NO_SKILLS instead of the bare JSON-schema
-    # stub. _env_knowledge still gives condition A a lean substitute rather than nothing.
-    _enabled = state.get("condition", "B") != "A"
-    _base = _read_skill("agents/orchestrator", "orchestrator", enabled=_enabled)
-    _env_kn = _env_knowledge(state.get("env", "local"), "orchestrator", enabled=_enabled)
-    _env_section = f"\n\n=== Environment Knowledge ===\n{_env_kn}" if _env_kn else ""
 
-    if _base:
+# __ Single Agent Node _________________________________________________________
+
+def single_agent(state: AgentState) -> dict:
+    try:
+        console.print("\n[dim cyan][single_agent] starting run...[/dim cyan]")
+        tracer.log_agent_start("single_agent", {"engine": state.get("engine", "parsl")})
+        tracer.log_agent_input("single_agent", {"pdf_path": state["pdf_path"], "goal": state["goal"]})
+
+        env = state.get("env", "local")
+        engine = state.get("engine", "parsl")
+        data_files = state.get("selected_data_files", [])
+
+        # __ Build the one system prompt for the whole run __
+        _base = _read_skill("agents/single_agent")
+        _env_kn = _read_skill(_ENV_KNOWLEDGE.get(env, "knowledge/local"))
+        _env_section = f"\n\n=== Environment Knowledge ===\n{_env_kn}" if _env_kn else ""
         _uc = _list_skills("use_cases")
         _sys = _list_skills("systems")
         _index = (f"\n\nAvailable skill contexts (set in skill_requests to load):"
-                  f"\n  use_cases: {_uc}  -- request as \"use_cases/<name>/orchestrator\""
+                  f"\n  use_cases: {_uc}  -- request as \"use_cases/<name>/single_agent\""
                   f"\n  systems:   {_sys}  -- request as \"systems/<name>\"") if (_uc or _sys) else ""
-        _sys_prompt = _base + _env_section + _index + "\n\n---\n\n" + ORCHESTRATOR_SYSTEM_PROMPT + "\n\n" + PROJECT_LAYOUT
-    else:
-        _sys_prompt = ORCHESTRATOR_SYSTEM_PROMPT_NO_SKILLS + _env_section + "\n\n" + PROJECT_LAYOUT
-    _human = "\n\n".join(parts)
+        system_prompt = _base + _env_section + _index + "\n\n---\n\n" + SINGLE_AGENT_SYSTEM_PROMPT + "\n\n" + PROJECT_LAYOUT
 
-    result: OrchestratorOutput = _invoke_structured(model, OrchestratorOutput, [
-        SystemMessage(content=_sys_prompt),
-        HumanMessage(content=_human),
-    ], "orchestrator")
+        messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
 
-    # Two-pass: if sub-skills requested, load them and re-invoke once
-    if result.skill_requests:
-        _sub = "\n\n".join(filter(None, (_read_skill(r, "orchestrator", enabled=_enabled) for r in result.skill_requests)))
-        if _sub:
-            _enriched = _sys_prompt + f"\n\n=== Loaded Skills ===\n{_sub}\n\n(Final pass -- do not set skill_requests.)"
-            result = _invoke_structured(model, OrchestratorOutput, [
-                SystemMessage(content=_enriched),
-                HumanMessage(content=_human),
-            ], "orchestrator")
-
-    # Hard overrides: lock routing at deterministic transition points
-    if state.get("current_step") == "installer_requirements_pending_approval":
-        result.next = "installer"
-    elif state.get("current_step") == "installer_complete":
-        result.next = "explorer"
-    elif state.get("current_step") == "explorer_complete":
-        # After explorer completes, check if key outputs exist before deciding to re-run.
-        # If the explorer produced results (even partial), prefer ending over re-running.
-        log = state.get("exploration_log", [])
-        successes = sum(1 for e in log if e.get("succeeded", False))
-        if successes > 0 and result.next == "explorer":
-            # Explorer already ran and produced some results -- check if re-run is justified
-            explorer_revs = state.get("explorer_revisions", 0)
-            if explorer_revs >= 1:
-                console.print("[dim yellow][orchestrator] explorer already revised once with results -- ending[/dim yellow]")
-                result.next = "end"
-
-    panel_body = f"[bold]Routing to:[/bold] [green]{result.next}[/green]\n\n[bold]Reasoning:[/bold]\n{result.reasoning}"
-    if result.feedback:
-        panel_body += f"\n\n[bold]Feedback to {result.next}:[/bold]\n[yellow]{result.feedback}[/yellow]"
-    console.print(Panel(panel_body, title="[bold cyan]Orchestrator Decision[/bold cyan]", border_style="cyan"))
-
-    # Only wriiten in orchestrator, planner/installer don't use it 
-    if _run_log_path:
-        with open(_run_log_path, "a") as _lf:
-            _lf.write(json.dumps({
-                "ts":         datetime.now().isoformat(),
-                "from_step":  state.get("current_step"),
-                "routing_to": result.next,
-                "revisions":  revisions,
-                "feedback":   result.feedback,
-                "reasoning":  result.reasoning[:500],
-            }) + "\n")
-
-    already_ran = {
-        "planner":   bool(state.get("literature_findings")),
-        "installer": bool(state.get("requirements_content")),
-        "explorer":  bool(state.get("exploration_log")),
-    }
-    revision_update = {}
-    if result.next in already_ran and already_ran[result.next]:
-        key = f"{result.next}_revisions"
-        revision_update[key] = state.get(key, 0) + 1
-        console.print(f"[bold yellow][orchestrator] revision #{revision_update[key]} for {result.next}[/bold yellow]")
-        tracer.log_replan(result.next, revision_update[key])
-
-    state_update = {
-        "next":                  result.next,
-        "orchestrator_feedback": result.feedback,
-        "requirements_approved": result.requirements_approved,
-        "current_step":          f"orchestrator_routed_to_{result.next}",
-        **revision_update,
-    }
-
-    tracer.log_routing("orchestrator", result.next, result.reasoning, result.feedback,                   ############# insert TRACER #############
-                        payload_size=len(json.dumps(state_update, default=str)))
-    tracer.log_agent_output("orchestrator", {"next": result.next, "feedback": result.feedback})          ############# insert TRACER #############
-    tracer.log_agent_end("orchestrator")                                                                 ############# TRACER ENDS   #############
-
-    return state_update
-
-
-################################################################################## PLANNER ####################################################################################
-def planner(state: AgentState) -> dict:
-    try:
-        console.print("\n[dim cyan][planner] reading PDF...[/dim cyan]")
-        tracer.log_agent_start("planner")
-        tracer.log_agent_input("planner", {"pdf_path": state["pdf_path"], "goal": state["goal"]})
-
+        # __ Phase 1: planning __
+        console.print("[dim cyan][single_agent] phase 1/3 -- planning...[/dim cyan]")
         reader = PdfReader(state["pdf_path"])
         pdf_text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
-        console.print(f"[dim cyan][planner] loaded {len(reader.pages)} pages[/dim cyan]")
+        console.print(f"[dim cyan][single_agent] loaded {len(reader.pages)} pages[/dim cyan]")
 
-        feedback = state.get("orchestrator_feedback", "")
-        feedback_section = (f"\n\nOrchestrator feedback -- address these issues before returning:\n{feedback}"
-                            if feedback else "")
-
-        # Build system prompt: base skill + env knowledge + available skill index + core prompt.
-        # condition A (no-skills): _base comes back empty (suppressed) -> fall back to the
-        # separate PLANNER_PROMPT_NO_SKILLS instead of the bare JSON-schema stub.
-        _enabled = state.get("condition", "B") != "A"
-        _base = _read_skill("agents/planner", "planner", enabled=_enabled)
-        _env_kn = _env_knowledge(state.get("env", "local"), "planner", enabled=_enabled)
-        _env_section = f"\n\n=== Environment Knowledge ===\n{_env_kn}" if _env_kn else ""
-
-        if _base:
-            _uc = _list_skills("use_cases")
-            _sys = _list_skills("systems")
-            _index = (f"\n\nAvailable skill contexts (set in skill_requests to load):"
-                      f"\n  use_cases: {_uc}  -- request as \"use_cases/<name>/planner\""
-                      f"\n  systems:   {_sys}  -- request as \"systems/<name>\"") if (_uc or _sys) else ""
-            _sys_prompt = _base + _env_section + _index + "\n\n---\n\n" + PLANNER_PROMPT + "\n\n" + PROJECT_LAYOUT
-        else:
-            _sys_prompt = PLANNER_PROMPT_NO_SKILLS + _env_section + "\n\n" + PROJECT_LAYOUT
-        _data_files = state.get("selected_data_files", [])
         _data_section = (f"\n\nAvailable input data files (in /app/data/):\n" +
-                         "\n".join(f"  - {f}" for f in _data_files)) if _data_files else ""
-        _human = f"Goal: {state['goal']}{_data_section}\n\nPaper:\n{pdf_text}{feedback_section}"
+                         "\n".join(f"  - {f}" for f in data_files)) if data_files else ""
+        plan_text = f"Goal: {state['goal']}{_data_section}\n\nPaper:\n{pdf_text}"
 
         # Build human message -- multimodal if an image was provided
         if state.get("image_path"):
-            console.print("\n[dim cyan][planner] loading image...[/dim cyan]")
+            console.print("[dim cyan][single_agent] loading image...[/dim cyan]")
             with open(state["image_path"], "rb") as _f:
                 _img_bytes = _f.read()
             _b64 = base64.b64encode(_img_bytes).decode()
             _mime, _ = mimetypes.guess_type(state["image_path"])
             _mime = _mime or "image/png"
-            _human_msg = HumanMessage(content=[
+            plan_msg = HumanMessage(content=[
                 {"type": "image_url", "image_url": {"url": f"data:{_mime};base64,{_b64}"}},
-                {"type": "text", "text": _human},
+                {"type": "text", "text": plan_text},
             ])
-            console.print(f"[dim cyan][planner] image loaded ({_mime}, {len(_img_bytes)//1024}KB)[/dim cyan]")
+            console.print(f"[dim cyan][single_agent] image loaded ({_mime}, {len(_img_bytes)//1024}KB)[/dim cyan]")
         else:
-            _human_msg = HumanMessage(content=_human)
+            plan_msg = HumanMessage(content=plan_text)
 
-        result: PlannerOutput = _invoke_structured(model, PlannerOutput, [
-            SystemMessage(content=_sys_prompt),
-            _human_msg,
-        ], "planner")
+        messages.append(plan_msg)
+        plan: PlanOutput = _invoke_structured(model, PlanOutput, messages, "single_agent")
+        messages.append(AIMessage(content=json.dumps(plan.model_dump())))
 
-        # Two-pass: if sub-skills requested, load them and re-invoke once
-        if result.skill_requests:
-            _sub = "\n\n".join(filter(None, (_read_skill(r, "planner", enabled=_enabled) for r in result.skill_requests)))
+        # Two-pass: if sub-skills requested, load them and re-invoke once, in-conversation
+        if plan.skill_requests:
+            _sub = "\n\n".join(filter(None, (_read_skill(r) for r in plan.skill_requests)))
             if _sub:
-                _enriched = _sys_prompt + f"\n\n=== Loaded Skills ===\n{_sub}\n\n(Final pass -- do not set skill_requests.)"
-                result = _invoke_structured(model, PlannerOutput, [
-                    SystemMessage(content=_enriched),
-                    _human_msg,
-                ], "planner")
+                messages.append(HumanMessage(
+                    content=f"Loaded skills:\n{_sub}\n\nRespond again with the same JSON "
+                             f"shape; do not set skill_requests this time."))
+                plan = _invoke_structured(model, PlanOutput, messages, "single_agent")
+                messages.append(AIMessage(content=json.dumps(plan.model_dump())))
 
         # ADIOS2 is the data-I/O layer for this engine -- don't leave it to LLM judgment
         # whether to request it. Without it, every task silently falls back to numpy I/O
         # (engine="adios2-fallback") with no real ADIOS2 transport ever exercised.
-        if state.get("engine") == "adios" and "adios2" not in result.stack_decision:
-            result.stack_decision.append("adios2")
+        if engine == "adios" and "adios2" not in plan.stack_decision:
+            plan.stack_decision.append("adios2")
 
-        console.print(f"[dim cyan][planner] produced {len(result.tasks)} tasks[/dim cyan]")
-
-        findings = "\n".join(f"  [cyan]*[/cyan] {f}" for f in result.literature_findings)
-        stack    = "\n".join(f"  [cyan]*[/cyan] {s}" for s in result.stack_decision)
-        tasks    = "\n".join(f"  [bold]{i+1}.[/bold] {t}" for i, t in enumerate(result.tasks))
+        console.print(f"[dim cyan][single_agent] produced {len(plan.tasks)} tasks[/dim cyan]")
+        findings_str = "\n".join(f"  [cyan]*[/cyan] {f}" for f in plan.literature_findings)
+        stack_str    = "\n".join(f"  [cyan]*[/cyan] {s}" for s in plan.stack_decision)
+        tasks_str    = "\n".join(f"  [bold]{i+1}.[/bold] {t}" for i, t in enumerate(plan.tasks))
         console.print(Panel(
-            f"[bold]Literature Findings[/bold]\n{findings}\n\n"
-            f"[bold]Stack[/bold]\n{stack}\n\n"
-            f"[bold]Tasks[/bold]\n{tasks}",
-            title="[bold green]Planner Output[/bold green]",
+            f"[bold]Literature Findings[/bold]\n{findings_str}\n\n"
+            f"[bold]Stack[/bold]\n{stack_str}\n\n"
+            f"[bold]Tasks[/bold]\n{tasks_str}",
+            title="[bold green]Planning Phase Output[/bold green]",
             border_style="green",
         ))
-
-        tracer.log_agent_output("planner", {
-            "findings_count": len(result.literature_findings),
-            "stack": result.stack_decision,
-            "tasks_count": len(result.tasks),
-            "tasks_preview": result.tasks[:3],
+        tracer.log_agent_output("single_agent", {
+            "phase": "planning",
+            "findings_count": len(plan.literature_findings),
+            "stack": plan.stack_decision,
+            "tasks_count": len(plan.tasks),
         })
-        tracer.log_agent_end("planner")
+
+        # __ Phase 2: install (deterministic, no LLM call, no tools) __
+        console.print("[dim cyan][single_agent] phase 2/3 -- installing stack...[/dim cyan]")
+        install_ok, install_report = _install_stack(plan.stack_decision)
+        messages.append(HumanMessage(content=f"Install report:\n{install_report}"))
+        tracer.log_agent_output("single_agent", {
+            "phase": "install", "ok": install_ok, "report": install_report,
+        })
+
+        # __ Phase 3: execution (tools unlock here) __
+        console.print("[dim cyan][single_agent] phase 3/3 -- executing tasks...[/dim cyan]")
+
+        # Auto-detect a use-case skill the same way the old explorer did, now matched
+        # against use_cases/<name>/single_agent.SKILL.md instead of .../explorer.SKILL.md.
+        _stack_lower = [p.lower() for p in plan.stack_decision]
+        _uc_skill = ""
+        _uc_dir = os.path.join(_SKILLS_ROOT, "use_cases")
+        if os.path.isdir(_uc_dir):
+            for uc_name in os.listdir(_uc_dir):
+                content = _read_skill(f"use_cases/{uc_name}/single_agent")
+                if not content:
+                    continue
+                desc_lower = content[:500].lower()
+                if any(pkg in desc_lower for pkg in _stack_lower):
+                    _uc_skill = content
+                    console.print(f"[dim cyan][single_agent] loaded use case skill: {uc_name}[/dim cyan]")
+                    break
+
+        exec_parts = []
+        if data_files:
+            exec_parts.append("Available input data files (in /app/data/):\n" +
+                              "\n".join(f"  - {f}" for f in data_files))
+        if plan.literature_findings:
+            exec_parts.append("Literature findings:\n" +
+                              "\n".join(f"  - {f}" for f in plan.literature_findings))
+        if plan.stack_decision:
+            exec_parts.append(f"Software stack in venv: {', '.join(plan.stack_decision)}")
+        if plan.tasks:
+            exec_parts.append("Tasks to execute:\n" +
+                              "\n".join(f"  {i+1}. {t}" for i, t in enumerate(plan.tasks)))
+        if _uc_skill:
+            exec_parts.append("=== Use Case Context ===\n" + _uc_skill)
+
+        messages.append(HumanMessage(content="\n\n".join(exec_parts)))
+
+        messages, exploration_log = run_execution_loop_sync(messages, engine, agent_name="single_agent")
+
+        total = len(exploration_log)
+        successes = sum(1 for e in exploration_log if e.get("succeeded", False))
+        tracer.log_agent_output("single_agent", {
+            "phase": "execution", "total_tool_calls": total, "successes": successes,
+            "failures": total - successes,
+        })
+        tracer.log_agent_end("single_agent")
 
         return {
-            "literature_findings": result.literature_findings,
-            "stack_decision":      result.stack_decision,
-            "tasks":               result.tasks,
-            "current_step":        "planner_complete",
+            "messages":             messages,
+            "literature_findings":  plan.literature_findings,
+            "stack_decision":       plan.stack_decision,
+            "tasks":                plan.tasks,
+            "requirements_content": "\n".join(plan.stack_decision),
+            "exploration_log":      exploration_log,
+            "current_step":         "single_agent_complete",
         }
     except Exception as e:
-        console.print(f"[red][planner] ERROR: {e}[/red]")
+        console.print(f"[red][single_agent] ERROR: {e}[/red]")
         raise
 
-################################################################################################### INSTALLER ##############################################################
-
-def installer(state: AgentState) -> dict:
-    import sys
-    try:
-        tracer.log_agent_start("installer")
-        build_dir         = os.path.join(os.path.dirname(os.path.abspath(__file__)), "builds")
-        os.makedirs(build_dir, exist_ok=True)
-        requirements_path = os.path.join(build_dir, "requirements.txt")
-
-        if state.get("requirements_approved"):
-            # __ Phase 2: requirements approved -- pip install into the current venv __
-            with open(requirements_path) as f:
-                packages = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
-
-            if not packages:
-                console.print("[dim cyan][installer] no packages to install[/dim cyan]")
-                tracer.log_agent_output("installer", {"status": "no packages"})
-                tracer.log_agent_end("installer")
-                return {"current_step": "installer_complete"}
-
-            console.print(f"[dim cyan][installer] pip installing {len(packages)} packages...[/dim cyan]")
-            proc = subprocess.run(
-                [sys.executable, "-m", "pip", "install"] + packages,
-                capture_output=True, text=True, timeout=600,
-            )
-            if proc.returncode != 0:
-                console.print(f"[yellow][installer] pip stderr:\n{proc.stderr[-2000:]}[/yellow]")
-            else:
-                console.print("[dim cyan][installer] packages ready[/dim cyan]")
-
-            tracer.log_agent_output("installer", {"status": "packages installed", "count": len(packages)})
-            tracer.log_agent_end("installer")
-            return {"current_step": "installer_complete"}
-
-        else:
-            # __ Phase 1: read or generate requirements.txt, send to orchestrator for approval __
-            feedback = state.get("orchestrator_feedback", "")
-            stack = state.get("stack_decision", [])
-
-            existing_content = None
-            if os.path.isfile(requirements_path):
-                with open(requirements_path) as f:
-                    existing_content = f.read()
-                existing_packages = {
-                    ln.strip() for ln in existing_content.splitlines()
-                    if ln.strip() and not ln.startswith("#")
-                }
-                stale = bool(stack) and existing_packages != set(stack)
-            else:
-                stale = False
-
-            # Regenerate from stack_decision if the orchestrator rejected the previous
-            # requirements, OR if the file on disk doesn't match this run's stack_decision
-            # (e.g. left over from a prior run with a different engine).
-            if (feedback and stack) or stale:
-                reason = (
-                    "orchestrator rejected previous requirements"
-                    if feedback else
-                    "on-disk requirements.txt is stale (doesn't match current stack_decision)"
-                )
-                console.print(f"[dim cyan][installer] {reason} -- regenerating from stack_decision...[/dim cyan]")
-                content = "\n".join(pkg for pkg in stack if pkg) + "\n"
-                with open(requirements_path, "w") as f:
-                    f.write(content)
-                console.print(f"[dim cyan][installer] regenerated requirements.txt with {len(stack)} packages[/dim cyan]")
-            elif existing_content is not None:
-                console.print("[dim cyan][installer] reading existing requirements.txt (matches stack_decision)...[/dim cyan]")
-                content = existing_content
-            else:
-                console.print("[dim cyan][installer] generating requirements.txt from stack_decision...[/dim cyan]")
-                content = "\n".join(pkg for pkg in stack if pkg) + "\n"
-                with open(requirements_path, "w") as f:
-                    f.write(content)
-                console.print(f"[dim cyan][installer] generated requirements.txt with {len(stack)} packages[/dim cyan]")
-
-            console.print(Panel(
-                content,
-                title="[bold yellow]requirements.txt -- Pending Orchestrator Approval[/bold yellow]",
-                border_style="yellow",
-            ))
-            console.print("[dim yellow][installer] waiting for orchestrator approval...[/dim yellow]")
-
-            tracer.log_agent_output("installer", {"status": "pending approval", "packages": content.strip()})
-            tracer.log_agent_end("installer")
-            return {
-                "requirements_content": content,
-                "current_step":         "installer_requirements_pending_approval",
-            }
-
-    except Exception as e:
-        console.print(f"[red][installer] ERROR: {e}[/red]")
-        raise
 
 # __ Graph _____________________________________________________________________
-####################################################################################### LangGraph Nodes #######################################################################################################
-
-def route_orchestrator(state: AgentState) -> str:
-    return state["next"]
-
 
 graph = StateGraph(AgentState)
-
-graph.add_node("orchestrator", orchestrator)
-graph.add_node("planner",      planner)
-graph.add_node("installer",    installer)
-graph.add_node("explorer",     explorer)
-
-graph.set_entry_point("orchestrator")
-
-graph.add_conditional_edges("orchestrator", route_orchestrator, {
-    "planner":   "planner",
-    "installer": "installer",
-    "explorer":  "explorer",
-    "end":       END,
-})
-
-graph.add_edge("planner",   "orchestrator")
-graph.add_edge("installer", "orchestrator")
-graph.add_edge("explorer",  "orchestrator")
+graph.add_node("single_agent", single_agent)
+graph.set_entry_point("single_agent")
+graph.add_edge("single_agent", END)
 
 app = graph.compile()
 
 
 # __ Run _______________________________________________________________________
-######################################################################### Console Terminal CLI DISPLAY AND RUN LOGGING ################################################################
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="MAW -- Multi-Agent Workflow (MCP Approach)")
+    parser = argparse.ArgumentParser(description="MAW -- Single-Agent Pipeline (Condition C)")
     parser.add_argument("--paper", type=str, help="Path to the PDF paper or paper index (1-based)")
     parser.add_argument("--image", type=str, help="Path to image file (diagram/figure) to use for planning")
     parser.add_argument("--goal", type=str, help="Goal for the workflow")
@@ -773,16 +435,13 @@ if __name__ == "__main__":
     parser.add_argument("--env", type=str, default="local",
                         choices=["local", "hpc"],
                         help="Execution environment: local (default) or hpc (LCRC/PBS)")
-    parser.add_argument("--condition", type=str, default="B",
-                        choices=["A", "B", "C"],
-                        help="Ablation condition: A=no-skills, B=full (default), C=single-agent")
     parser.add_argument("--trial", type=int, default=1,
-                        help="Trial number for repeated (paper, condition) runs (default: 1)")
+                        help="Trial number for repeated (paper, trial) runs (default: 1)")
     parser.add_argument("--domain", type=str, default="",
                         help="Paper domain label, e.g. molecular_nucleation (optional)")
     args = parser.parse_args()
 
-    console.print(Panel(f"[bold blue]MAW -- Multi-Agent Workflow (MCP Approach)[/bold blue]\n[dim]Engine: {args.engine} | Env: {args.env}[/dim]", border_style="blue"))
+    console.print(Panel(f"[bold blue]MAW -- Single-Agent Pipeline (Condition C)[/bold blue]\n[dim]Engine: {args.engine} | Env: {args.env}[/dim]", border_style="blue"))
 
     lit_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Literature")
     os.makedirs(lit_dir, exist_ok=True)
@@ -856,7 +515,7 @@ if __name__ == "__main__":
     all_data_files = sorted(f for f in os.listdir(data_dir) if os.path.isfile(os.path.join(data_dir, f))) if os.path.isdir(data_dir) else []
 
     if not all_data_files:
-        console.print("[yellow]No files found in data/ -- agents will have no input data.[/yellow]")
+        console.print("[yellow]No files found in data/ -- the agent will have no input data.[/yellow]")
         selected_data_files = []
     else:
         console.print("\n[bold]Available data files:[/bold]")
@@ -893,8 +552,6 @@ if __name__ == "__main__":
     runs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs")
     os.makedirs(runs_dir, exist_ok=True)
     _run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    _run_log_path = os.path.join(runs_dir, _run_id + ".jsonl")
-    console.print(f"[dim]Run log: {_run_log_path}[/dim]")
 
     initial_state = {
         "messages":              [],
@@ -906,25 +563,18 @@ if __name__ == "__main__":
         "exploration_log":       [],
         "selected_data_files":   selected_data_files,
         "requirements_content":  "",
-        "requirements_approved": False,
         "image_path":            image_path,
         "current_step":          "start",
-        "orchestrator_feedback": "",
-        "next":                  "",
-        "planner_revisions":     0,
-        "installer_revisions":   0,
-        "explorer_revisions":    0,
         "engine":                args.engine,
         "env":                   args.env,
-        "condition":             args.condition,
     }
 
     trace_path = os.path.join(runs_dir, _run_id + "_trace.json")
 
-    tracer.reset()   # brefor you run it, reset the tracer to clear any previous runs from the dashboard
+    tracer.reset()   # before you run it, reset the tracer to clear any previous runs from the dashboard
     tracer.start_run(
         run_id=_run_id,
-        condition=args.condition,
+        condition="C",
         trial=args.trial,
         paper_id=_slugify(pdf_path) if pdf_path else "no_paper",
         paper_path=pdf_path,
@@ -955,7 +605,6 @@ if __name__ == "__main__":
     summary = tracer.get_summary()
     console.print(f"\n[bold]Trace Summary:[/bold]")
     console.print(f"  Agents: {', '.join(summary['agents_involved'])}")
-    console.print(f"  Routing path: {' -> '.join(summary['routing_path'])}")
     console.print(f"  Tool calls: {summary['tool_calls']} ({summary['tool_successes']} succeeded)")
     console.print(f"  Total time: {summary['total_duration_s']}s")
 
@@ -973,4 +622,3 @@ if __name__ == "__main__":
             console.print(f"  By agent:")
             for agent, count in sorted(tokens_by_agent.items()):
                 console.print(f"    {agent}: {count:,}")
-
