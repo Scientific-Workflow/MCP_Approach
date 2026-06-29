@@ -63,6 +63,8 @@ Execution Layer (Local Python Venv)
 MCP_Approach_SINGLE/
 +-- agent_mcp.py                  <- Single-agent pipeline (3 phases) + trivial 1-node graph
 +-- mcp_explorer.py               <- MCP tool definitions + session/ReAct-loop plumbing (execution phase)
++-- run_archiver.py               <- Snapshots work/run0 + trace.json after every run, then wipes run0
++-- trace_logger.py / trace_schema.py  <- Per-run tracing (LLM calls, tool calls, routing, metadata)
 +-- servers/
 |   +-- __init__.py
 |   +-- parsl_server.py           <- Parsl Workflow MCP Server
@@ -118,6 +120,38 @@ are no separate agents to route between.
 
 ---
 
+## Run Archiving
+
+Same scheme as the sibling `MCP_Approach` repo: `work/run0/` is a single fixed
+working directory shared by every run, overwritten by whatever the next run
+does. `run_archiver.py` snapshots it automatically -- right after the trace is
+saved (on both success and failure paths in `agent_mcp.py`), it copies
+`work/run0/` and the run's `trace.json` into a permanent folder **outside
+this repo**, then clears `run0` for the next run.
+
+Archive location: `/gpfs/fs1/home/jacob.oh/SULI/TEST_RUNS/single_approach/<folder>/`
+(the `mcp_approach/` sibling holds runs from the four-role `MCP_Approach`
+repo -- kept separate so the two never collide). Each `<folder>` contains
+`trace.json` and a `work/` subfolder with everything that was in `run0`.
+
+Folder naming: `<date>__<usecase>__<engine>__<condition>__<combination>__trial<trial>`
+
+- `date` -- `YYYYMMDD` from the run's `run_id`
+- `usecase` -- `--domain` if passed, else falls back to the paper's slug
+- `engine` -- `--engine` (parsl/pycompss/adios)
+- `condition` -- always `C` here (this repo only ever runs the single-agent ablation condition)
+- `combination` -- **new required `--combination {a,b,c,d}` flag**: labels
+  which planner inputs were actually used this run --
+  a=PDF+Image+Desc, b=PDF+Desc, c=Image+Desc, d=Desc Only.
+  (`--paper` is currently mandatory, so only a/b are reachable today; c/d
+  become usable if paper selection is ever made optional.)
+- `trial` -- `--trial`
+
+Name collisions get a Windows-style ` (2)`, ` (3)`, ... suffix rather than
+being overwritten.
+
+---
+
 ## MCP Server Tools (exposed by servers/parsl_server.py)
 
 | Tool | Description |
@@ -142,7 +176,7 @@ To add a new engine:
 1. Create `servers/<engine>_server.py` implementing the same tool interface
 2. Add the engine name to the `ENGINE_SERVERS` dict in `mcp_explorer.py`
 3. Add the engine name to the `--engine` choices in `agent_mcp.py`
-4. Run with `python agent_mcp.py --engine <engine> --paper 1 --goal "..."`
+4. Run with `python agent_mcp.py --engine <engine> --paper 1 --combination b --goal "..."`
 
 The single agent's planning logic, install logic, and tool-calling loop are completely
 unchanged -- only which MCP server it connects to during the execution phase changes.
@@ -152,11 +186,11 @@ unchanged -- only which MCP server it connects to during the execution phase cha
 ## Running the System
 
 ```bash
-# With Parsl engine (default)
-python agent_mcp.py --paper 1 --goal "Reproduce this workflow using LAMMPS and OVITO"
+# With Parsl engine (default). --combination is required (a/b/c/d, see Run Archiving above)
+python agent_mcp.py --paper 1 --combination b --goal "Reproduce this workflow using LAMMPS and OVITO"
 
 # Specify engine explicitly
-python agent_mcp.py --engine parsl --paper 1 --goal "..."
+python agent_mcp.py --engine parsl --paper 1 --combination b --goal "..."
 ```
 
 ---
