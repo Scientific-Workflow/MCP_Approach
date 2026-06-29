@@ -9,8 +9,11 @@ Pipeline:
     orchestrator -> planner -> installer -> explorer -> end
 
 Usage:
-    python agent_mcp.py --paper 1 --goal "Reproduce this workflow..."
-    python agent_mcp.py --paper YildizO_RAPIDS.pdf --goal "..."
+    python agent_mcp.py --paper 1 --combination b --goal "Reproduce this workflow..."
+    python agent_mcp.py --paper YildizO_RAPIDS.pdf --combination a --goal "..."
+
+--combination is required: a=PDF+Image+Desc, b=PDF+Desc, c=Image+Desc, d=Desc Only
+(labels the planner inputs actually used this run; see run_archiver.py)
 """
 
 import os
@@ -38,6 +41,7 @@ from langgraph.graph.message import add_messages
 
 from mcp_explorer import explorer
 from trace_logger import tracer, extract_usage, message_to_dict
+from run_archiver import archive_run
 
 load_dotenv()
 
@@ -780,6 +784,10 @@ if __name__ == "__main__":
                         help="Trial number for repeated (paper, condition) runs (default: 1)")
     parser.add_argument("--domain", type=str, default="",
                         help="Paper domain label, e.g. molecular_nucleation (optional)")
+    parser.add_argument("--combination", type=str, required=True,
+                        choices=["a", "b", "c", "d"],
+                        help="Planner input combination: a=PDF+Image+Desc, "
+                             "b=PDF+Desc, c=Image+Desc, d=Desc Only")
     args = parser.parse_args()
 
     console.print(Panel(f"[bold blue]MAW -- Multi-Agent Workflow (MCP Approach)[/bold blue]\n[dim]Engine: {args.engine} | Env: {args.env}[/dim]", border_style="blue"))
@@ -925,6 +933,7 @@ if __name__ == "__main__":
     tracer.start_run(
         run_id=_run_id,
         condition=args.condition,
+        combination=args.combination,
         trial=args.trial,
         paper_id=_slugify(pdf_path) if pdf_path else "no_paper",
         paper_path=pdf_path,
@@ -945,11 +954,18 @@ if __name__ == "__main__":
         tracer.save(trace_path)
         console.print(f"[red]Run failed: {e}[/red]")
         console.print(f"[dim]Trace saved (partial): {trace_path}[/dim]")
+        archive_path = archive_run(tracer.run_metadata, trace_path)
+        if archive_path:
+            console.print(f"[dim]Run archived (failed): {archive_path}[/dim]")
         raise
 
     # Save trace
     tracer.save(trace_path)  #save the trace to a file for later analysis
     console.print(f"[dim]Trace saved: {trace_path}[/dim]")
+
+    archive_path = archive_run(tracer.run_metadata, trace_path)
+    if archive_path:
+        console.print(f"[dim]Run archived: {archive_path}[/dim]")
 
     # Print interaction summary
     summary = tracer.get_summary()

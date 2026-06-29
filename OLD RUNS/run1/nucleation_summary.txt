@@ -1,0 +1,6 @@
+=== Nucleation Summary ===
+Total atoms: 4360
+Crystallization threshold (1/8 of atoms): 545.0
+Max crystallized atoms observed in any frame: 327
+Nucleation verdict: NOT NUCLEATED
+No frame exceeded the 1/8 crystallization threshold. This matches the paper's observation that nucleation is a rare event at high undercooling (only 1 in 60 instances nucleated at 210 K).

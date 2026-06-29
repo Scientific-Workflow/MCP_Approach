@@ -1,4 +1,3 @@
 numpy
 matplotlib
-adios2
 ovito

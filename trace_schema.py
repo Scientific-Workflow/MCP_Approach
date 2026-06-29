@@ -143,6 +143,7 @@ Event = Annotated[
 class RunMetadata(BaseModel):
     run_id: str
     condition: Literal["A", "B", "C"] = "B"
+    combination: Literal["a", "b", "c", "d", ""] = ""
     trial: int = 1
     paper_id: str = ""
     paper_path: str = ""
