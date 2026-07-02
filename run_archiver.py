@@ -65,12 +65,20 @@ def _unique_dest(root: str, name: str) -> str:
 
 
 def archive_run(metadata: RunMetadata, trace_path: str) -> str:
-    """Copy work/run0 + trace.json into ARCHIVE_ROOT/<slug>/, then wipe run0.
+    """Copy work/run0 + trace.json into ARCHIVE_ROOT/<slug>/.
 
     Called on both success and failure so a failed run's diagnostics are
     never silently dropped. Never raises -- a broken archiver should not
     take down a real run's exit status. Returns the archive folder path,
     or "" if archiving failed.
+
+    Does NOT clear work/run0 afterward -- it used to (wipe + recreate, gated
+    behind a successful copy), but since work/run0 is a single fixed directory
+    shared by every run, the next run's own setup tasks (re-copying input
+    files, run_lammps's own pre-run frame cleanup, etc.) are what's actually
+    responsible for not stepping on stale output, not a blanket wipe here.
+    Leaving the directory alone after archiving means a run is never one
+    archive-step bug away from losing both the copy and the original.
     """
     try:
         os.makedirs(ARCHIVE_ROOT, exist_ok=True)
@@ -81,12 +89,6 @@ def archive_run(metadata: RunMetadata, trace_path: str) -> str:
             shutil.copytree(_WORK_DIR, os.path.join(dest, "work"))
         if os.path.isfile(trace_path):
             shutil.copy2(trace_path, os.path.join(dest, "trace.json"))
-
-        # Only clear run0 once the copy above has actually landed, so a
-        # mid-copy failure never leaves us with neither a backup nor the original.
-        if os.path.isdir(_WORK_DIR):
-            shutil.rmtree(_WORK_DIR)
-            os.makedirs(_WORK_DIR)
 
         return dest
     except Exception as e:

@@ -47,10 +47,13 @@ When the explorer reports tool call failures, use these patterns to decide where
 
 When the installer presents requirements.txt for approval, verify it contains:
 - `ovito`
-- `parsl>=2024.0.0`
 - `numpy`
 - `matplotlib`
 - `Pillow`
+- The engine-specific package matching `--engine`:
+  - `parsl`: `parsl>=2024.0.0` should be present
+  - `pycompss`: `pycompss` should NOT be present (never pip-installed — see `systems/pycompss` skill)
+  - `adios`: `adios2` may or may not appear — approve either way (optional, has numpy fallback)
 
 **Do NOT approve** requirements.txt that includes `lammps` as a pip package — LAMMPS must be source-built (serial, `BUILD_MPI=off`). If `lammps` appears in the list, reject with feedback to remove it.
 

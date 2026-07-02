@@ -263,10 +263,124 @@ def submit_mpi_task(name: str, command: str, num_ranks: int = 0,
     })
 
 
+@tool
+def run_lammps(script: str = "in.watbox", work_dir: str = "", timeout: int = 7200) -> str:
+    """Run a LAMMPS simulation. Automatically selects the right execution method:
+    - Inside a PBS job with mpirun available: mpirun -np PBS_NP lmp -in <script>
+    - Otherwise (local / no MPI launcher): Python API (single process)
+
+    Implemented identically by every engine's server (parsl/pycompss/adios) --
+    always call this directly for LAMMPS, never reimplement it with submit_task.
+
+    Args:
+        script: Input script filename relative to work_dir (default: in.watbox)
+        work_dir: Working directory containing the script and data files.
+                  Supports /app/ paths (default: repo work/run0)
+        timeout: Max seconds to wait (default: 7200)
+    """
+    return _call_mcp_tool("run_lammps", {
+        "script": script, "work_dir": work_dir, "timeout": timeout,
+    })
+
+
+@tool
+def write_bp(name: str, bp_path: str, python_code: str, timeout: int = 1800) -> str:
+    """Write data to a BP file using a real, server-opened adios2.Stream.
+
+    Only available when --engine adios. python_code runs with `stream` already
+    bound to an open adios2.Stream(bp_path, "w") -- call
+    stream.write(var_name, data, shape, start, count) and
+    stream.write_attribute(...) on it directly. Do NOT open your own Stream or
+    import adios2 yourself; the server already did both.
+
+    Args:
+        name: Descriptive name for this task
+        bp_path: Output .bp path (supports /app/ paths)
+        python_code: Code that calls stream.write(...)/stream.write_attribute(...)
+        timeout: Max seconds to wait (default: 1800)
+    """
+    return _call_mcp_tool("write_bp", {
+        "name": name, "bp_path": bp_path, "python_code": python_code, "timeout": timeout,
+    })
+
+
+@tool
+def read_bp(name: str, bp_path: str, python_code: str, timeout: int = 1800) -> str:
+    """Read data from a BP file using a real, server-opened adios2.Stream.
+
+    Only available when --engine adios. python_code runs with `stream` already
+    bound to an open adios2.Stream(bp_path, "r") -- iterate
+    `for _ in stream.steps():` and call stream.read(var_name)/
+    stream.read_attribute(...) on it directly. Do NOT open your own Stream or
+    import adios2 yourself; the server already did both.
+
+    Args:
+        name: Descriptive name for this task
+        bp_path: Input .bp path to read (supports /app/ paths)
+        python_code: Code that calls stream.read(...)/stream.read_attribute(...)
+        timeout: Max seconds to wait (default: 1800)
+    """
+    return _call_mcp_tool("read_bp", {
+        "name": name, "bp_path": bp_path, "python_code": python_code, "timeout": timeout,
+    })
+
+
 _KNOWLEDGE_SKILLS = {
     "local": "knowledge/local",
     "hpc":   "knowledge/lcrc",
 }
+
+# Engine-specific skills, force-loaded into the explorer's system prompt (see
+# _explorer_async) rather than left to load_skill -- (systems/<engine>, knowledge/<ENGINE>).
+_ENGINE_SKILLS = {
+    "parsl":    ("systems/parsl",    "knowledge/PARSL"),
+    "pycompss": ("systems/pycompss", "knowledge/PyCOMPSs"),
+    "adios":    ("systems/adios",    "knowledge/ADIOS"),
+}
+
+_ENGINE_RELEVANT_TOOLS = (
+    "submit_task", "submit_shell_task", "submit_mpi_task", "write_bp", "read_bp",
+)
+
+
+def _classify_engine_usage(engine: str, tool_name: str, tool_args: dict,
+                            tool_result_text: str) -> tuple[Optional[str], Optional[bool]]:
+    """Derive (engine_backend, engine_verified) for a tool call, for tracing.
+
+    engine_backend is the raw "engine" field self-reported by the MCP server (e.g.
+    "parsl-fallback", "adios2-unused"), when the tool's JSON result has one.
+
+    All three engines now use the same shape: the server itself is authoritative
+    on whether the engine was genuinely used, not just available --
+    parsl/pycompss_server.py track whether their runtime actually dispatched the
+    task (vs. fallback); adios_server.py's _adios_engine_state additionally scans
+    the submitted code for a real adios2 API call and reports "adios2-unused" when
+    the package was available but never actually called (see adios_server.py --
+    that content-scan used to live here, moved server-side so it's the single
+    source of truth instead of being duplicated client- and server-side).
+    "-fallback" maps to None for adios specifically (package unavailable isn't the
+    explorer's fault), but to False for parsl/pycompss (their fallback always
+    means a genuine runtime-dispatch failure worth flagging). "adios2-n/a" also
+    maps to None -- most submit_task calls in an ADIOS run (LAMMPS, OVITO,
+    rendering, ...) have nothing to do with ADIOS2 at all, so "didn't use it"
+    isn't a meaningful signal for those; only "imported it but never called it"
+    ("adios2-unused") is.
+    """
+    if tool_name not in _ENGINE_RELEVANT_TOOLS:
+        return None, None
+    try:
+        backend = json.loads(tool_result_text).get("engine")
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        backend = None
+    if backend is None:
+        return None, None
+    if engine in ("parsl", "pycompss"):
+        return backend, not backend.endswith("-fallback")
+    if engine == "adios":
+        if backend in ("adios2-fallback", "adios2-n/a"):
+            return backend, None
+        return backend, backend != "adios2-unused"
+    return backend, None
 
 
 @tool
@@ -290,14 +404,25 @@ def load_skill(name: str) -> str:
     return content or ENV_NOTES.get(name, ENV_NOTES["local"])
 
 
-# All tools available to the explorer
+# Tools available to the explorer regardless of engine
 EXPLORER_TOOLS = [
     submit_task, submit_shell_task,
     get_task_status, get_task_result, list_tasks,
     install_package, check_package,
     list_files, read_file,
-    get_resources, submit_mpi_task, load_skill,
+    get_resources, submit_mpi_task, run_lammps, load_skill,
 ]
+
+# Engine-specific additions -- adios_server.py is the only server that
+# implements write_bp/read_bp, so there's no reason to show these to the LLM
+# for parsl/pycompss runs.
+_ENGINE_EXTRA_TOOLS = {
+    "adios": [write_bp, read_bp],
+}
+
+
+def _tools_for_engine(engine: str) -> list:
+    return EXPLORER_TOOLS + _ENGINE_EXTRA_TOOLS.get(engine, [])
 
 
 # __ Explorer System Prompt ____________________________________________________
@@ -506,9 +631,31 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                         console.print(f"[dim cyan][explorer] loaded use case skill: {uc_name}[/dim cyan]")
                         break
 
+        # Force-load engine-specific skills -- deterministic, not an LLM-discretionary
+        # tool call, since relying on the model to decide to load_skill("adios") is
+        # exactly how it ends up importing a package without ever using its real API.
+        # systems/<engine> (short, project-specific "what submit_task already does for
+        # you") is loaded before knowledge/<ENGINE> (the long general API reference) so
+        # the operational rules land first.
+        _sys_skill_path, _know_skill_path = _ENGINE_SKILLS.get(engine, (None, None))
+        _engine_skill = ""
+        if _sys_skill_path:
+            _engine_skill = "\n\n".join(filter(None, [
+                _read_skill(_sys_skill_path, enabled=_enabled),
+                _read_skill(_know_skill_path, enabled=_enabled),
+            ]))
+
         system_prompt = EXPLORER_SYSTEM_PROMPT
         if _base_skill:
             system_prompt = _base_skill + "\n\n---\n\n" + system_prompt
+        if _engine_skill:
+            system_prompt += (
+                f"\n\n--- {engine.upper()} Engine Reference (REQUIRED -- read before "
+                f"calling submit_task/submit_shell_task) ---\n\n"
+                f"This run's workflow engine is {engine}. Whether you actually exercise "
+                f"its real API is recorded in the trace, not just whether you import it.\n\n"
+                f"{_engine_skill}"
+            )
         if _uc_skill:
             system_prompt += "\n\n--- Use Case Context ---\n\n" + _uc_skill
 
@@ -530,7 +677,7 @@ async def _explorer_async(state: dict, engine: str) -> dict:
         llm = ChatOpenAI(
             model=os.getenv("CODER_MODEL_NAME", os.getenv("MODEL_NAME", "claudesonnet46")),
         )
-        llm_with_tools = llm.bind_tools(EXPLORER_TOOLS)
+        llm_with_tools = llm.bind_tools(_tools_for_engine(engine))
 
         messages = [
             SystemMessage(content=system_prompt),
@@ -710,21 +857,33 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                         tool_succeeded = True  # raw text response, not an error
                         display_status = "done"
 
+                engine_backend, engine_verified = _classify_engine_usage(
+                    engine, tool_name, tool_args, tool_result)
+
                 log_entry = {
                     "iteration": iteration + 1,
                     "tool": tool_name,
                     "args": tool_args,
                     "result": tool_result[:2000],
                     "succeeded": tool_succeeded,
+                    "engine_backend": engine_backend,
+                    "engine_verified": engine_verified,
                 }
                 exploration_log.append(log_entry)
 
                 color = "green" if tool_succeeded else "red"
                 console.print(f"[{color}][explorer] {tool_name} -> {display_status}[/{color}]")
+                if engine_verified is False:
+                    console.print(
+                        f"[bold red][explorer] WARNING: did not exercise the real "
+                        f"{engine} API in '{tool_args.get('name', tool_name)}' "
+                        f"(engine_backend={engine_backend})[/bold red]"
+                    )
 
                 # Log to trace (full result, not truncated -- needed for debugging failed runs)
                 tracer.log_tool_call("explorer", tool_name, tool_args,
-                                     tool_result, tool_succeeded, iteration=iteration + 1)
+                                     tool_result, tool_succeeded, iteration=iteration + 1,
+                                     engine_backend=engine_backend, engine_verified=engine_verified)
 
                 messages.append(ToolMessage(
                     content=tool_result[:_MAX_TOOL_RESULT_CHARS],

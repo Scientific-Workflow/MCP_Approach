@@ -320,15 +320,24 @@ def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int 
     Every MCP tool funnels through here, so this single chokepoint makes the whole
     server genuinely Parsl-driven. We block on .result() to keep each MCP tool call
     synchronous (true async/DAG submission is a separate, larger change).
+
+    The "used_parsl" key on the returned dict records which path actually ran --
+    callers use it to report an "engine" field, matching pycompss_server.py and
+    adios_server.py, so the trace can tell real Parsl dispatch apart from the
+    fallback path instead of just assuming it from --engine.
     """
     if _ensure_parsl():
         try:
-            return _exec_command_app(cmd, work_dir, timeout, dict(TASK_ENV)).result()
+            result = _exec_command_app(cmd, work_dir, timeout, dict(TASK_ENV)).result()
+            result["used_parsl"] = True
+            return result
         except Exception as e:
             # Parsl execution failed -- fall back so the workflow still completes.
             print(f"[parsl_server] Parsl exec failed ({e}); using direct subprocess",
                   file=sys.stderr)
-    return _run_command_local(cmd, work_dir, timeout)
+    result = _run_command_local(cmd, work_dir, timeout)
+    result["used_parsl"] = False
+    return result
 
 
 def _run_python_script(script: str, work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
@@ -444,6 +453,7 @@ except Exception as e:
         _tasks[task_id]["stderr"] = result["stderr"]
 
     _tasks[task_id]["completed_at"] = time.time()
+    _tasks[task_id]["engine"] = "parsl" if result.get("used_parsl") else "parsl-fallback"
 
     return json.dumps({
         "task_id": task_id,
@@ -452,6 +462,7 @@ except Exception as e:
         "exit_code": result["exit_code"],
         "stdout": result["stdout"][:3000],
         "stderr": result["stderr"][:3000],
+        "engine": _tasks[task_id]["engine"],
     }, indent=2)
 
 
@@ -509,12 +520,14 @@ def submit_shell_task(
     _tasks[task_id]["stdout"] = result["stdout"]
     _tasks[task_id]["stderr"] = result["stderr"]
     _tasks[task_id]["completed_at"] = time.time()
+    _tasks[task_id]["engine"] = "parsl" if result.get("used_parsl") else "parsl-fallback"
 
     return json.dumps({
         "task_id": task_id,
         "name": name,
         "status": _tasks[task_id]["status"],
         "exit_code": result["exit_code"],
+        "engine": _tasks[task_id]["engine"],
         "stdout": result["stdout"][:3000],
         "stderr": result["stderr"][:3000],
     }, indent=2)
@@ -539,6 +552,8 @@ def get_task_status(task_id: str) -> str:
     }
     if "exit_code" in task:
         info["exit_code"] = task["exit_code"]
+    if "engine" in task:
+        info["engine"] = task["engine"]
     if "submitted_at" in task and "completed_at" in task:
         info["duration_seconds"] = round(task["completed_at"] - task["submitted_at"], 2)
     return json.dumps(info, indent=2)
@@ -575,6 +590,7 @@ def list_tasks() -> str:
             "name": task["name"],
             "status": task["status"],
             "depends_on": task["depends_on"],
+            "engine": task.get("engine", "unknown"),
         })
     return json.dumps({"total": len(task_list), "tasks": task_list}, indent=2)
 

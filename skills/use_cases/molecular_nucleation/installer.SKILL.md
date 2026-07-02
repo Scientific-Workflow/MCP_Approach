@@ -24,11 +24,18 @@ Sets up the local venv with all packages needed for the LAMMPS water crystalliza
 
 ```
 ovito
-parsl>=2024.0.0
 numpy
 matplotlib
 Pillow
 ```
+
+**Engine-specific package (depends on `--engine`):**
+- `--engine parsl`: add `parsl>=2024.0.0` to requirements.txt — normal pip package.
+- `--engine pycompss`: do NOT add `pycompss` to requirements.txt — `pip install
+  pycompss` does not work reliably (see `systems/pycompss` skill); COMPSs is
+  hand-installed outside pip and detected automatically via `COMPSS_HOME`.
+- `--engine adios`: `adios2` is optional — try installing it, but a failure is not
+  fatal (numpy-I/O fallback exists, see `systems/adios` skill).
 
 **LAMMPS:** Must be built from source on Linux/local — it is NOT pip-installable for this use case. On HPC clusters (LCRC/Swing), LAMMPS is pre-installed on the cluster; install only the Python bindings into the venv. See build notes below.
 
@@ -39,8 +46,9 @@ Pillow
 ## LAMMPS — Local Build (Linux/WSL)
 
 Build from source with `BUILD_MPI=off`. The pip `lammps` wheel (and builds that link
-`libmpi.so`) call `MPI_Init` on import in serial contexts, causing Parsl `WorkerLost`
-crashes. Serial build avoids this entirely.
+`libmpi.so`) call `MPI_Init` on import in serial contexts, crashing the worker process
+that runs the task regardless of engine (e.g. Parsl's `WorkerLost`). Serial build
+avoids this entirely.
 
 ### System dependencies (apt)
 ```
@@ -89,7 +97,8 @@ cd /path/to/lammps-source/python && pip install .
 The pre-built binary links `libmpi.so.12` (Intel oneAPI MPI). These paths are needed at
 runtime for `from lammps import lammps` to succeed. They are handled automatically by:
 - `setup_hpc.sh` — sets `LD_LIBRARY_PATH` for the agent process
-- `TASK_ENV` in `servers/parsl_server.py` — propagates paths to every task subprocess
+- `TASK_ENV` in `servers/<engine>_server.py` (`parsl_server.py`/`pycompss_server.py`/
+  `adios_server.py` each define one) — propagates paths to every task subprocess
 
 Run `source setup_hpc.sh` before starting the agent on HPC. No manual `module load` needed.
 

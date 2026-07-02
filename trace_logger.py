@@ -162,10 +162,13 @@ class TraceLogger:
 
     def log_tool_call(self, agent_name: str, tool_name: str, args: dict,
                        result: str, succeeded: bool, duration_s: float = 0,
-                       iteration: Optional[int] = None):
+                       iteration: Optional[int] = None,
+                       engine_backend: Optional[str] = None,
+                       engine_verified: Optional[bool] = None):
         event = ToolCallEvent(agent=agent_name, tool=tool_name, args=args,
                                result=result if isinstance(result, str) else str(result),
                                succeeded=succeeded, duration_s=duration_s, iteration=iteration,
+                               engine_backend=engine_backend, engine_verified=engine_verified,
                                elapsed_s=self._elapsed(), timestamp=self._now())
         self.events.append(event.model_dump())
 

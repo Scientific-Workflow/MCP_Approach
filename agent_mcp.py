@@ -434,6 +434,21 @@ def orchestrator(state: AgentState) -> dict:
         for entry in log[-5:]:
             status_str = "OK" if entry.get("succeeded", False) else "FAILED"
             parts.append(f"  [{entry['tool']}] {status_str} - {entry.get('result', '')[:200]}")
+        # engine_verified is set by mcp_explorer.py's _classify_engine_usage -- False
+        # means a submit_task/submit_shell_task/submit_mpi_task call didn't demonstrably
+        # exercise the real workflow engine (see orchestrator skill for what to do about it).
+        unverified = [e for e in log if e.get("engine_verified") is False]
+        if unverified:
+            parts.append(
+                f"ENGINE USAGE WARNING: {len(unverified)} of {total} tool call(s) did not "
+                f"demonstrably exercise the real {state.get('engine')} API/runtime "
+                f"(fallback path or no real API call detected): " +
+                "; ".join(
+                    f"{e['tool']}({e.get('args', {}).get('name', '?')}, "
+                    f"engine_backend={e.get('engine_backend')})"
+                    for e in unverified[:5]
+                )
+            )
 
     # Build system prompt: base skill + env knowledge + available skill index + core prompt.
     # condition A (no-skills): _base comes back empty (suppressed) -> fall back to the

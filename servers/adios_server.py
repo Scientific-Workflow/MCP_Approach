@@ -79,6 +79,55 @@ def _check_adios2() -> bool:
     return _adios2_available
 
 
+# __ Real ADIOS2 Usage Verification ____________________________________________
+# Unlike PyCOMPSs's @task wrapping, the server can't structurally force ADIOS2
+# usage for arbitrary submit_task code -- it's an I/O library, not a task
+# scheduler, so there's no single call-site to wrap. This is the server-side
+# source of truth for whether submitted code actually called a real API, as
+# opposed to just having `adios2` importable. The "engine" field below is what
+# the explorer's trace classifier (mcp_explorer.py) reads -- it no longer does
+# its own content scan, this is now the single place that logic lives.
+
+_ADIOS_API_MARKERS = (
+    "adios2.open(", ".declare_io(", ".set_engine(", "adios2.ADIOS(",
+    ".begin_step(", ".end_step(", "adios2.Stream(", ".Stream(",
+)
+# write_bp/read_bp pre-open the Stream themselves (see _wrap_as_bp_stream_task),
+# so what matters there is whether the user code calls a method on it, not
+# whether it opened one.
+_STREAM_USAGE_MARKERS = (".write(", ".read(", ".write_attribute(", ".read_attribute(")
+_ADIOS_IMPORT_MARKERS = ("import adios2", "from adios2")
+
+
+def _adios_engine_state(python_code: str, markers: tuple = _ADIOS_API_MARKERS,
+                         require_intent: bool = True) -> str:
+    """Classify real ADIOS2 usage for the "engine" field:
+    - "adios2-fallback": package unavailable
+    - "adios2-n/a":      package available, but the code shows no intent to use
+                          it (no adios2 import) -- most submit_task calls in an
+                          ADIOS run (LAMMPS, OVITO, rendering, ...) have nothing
+                          to do with ADIOS2 at all, and flagging those as
+                          "unused" would be noise, not a real signal.
+    - "adios2-unused":   intent shown (an import, or for write_bp/read_bp just
+                          being called at all) but no real API call found
+    - "adios2":          package available and genuinely used
+
+    require_intent=True (submit_task/submit_shell_task/submit_mpi_task): only
+    "adios2-unused" when the code actually tries to touch adios2 but never
+    calls its API; "adios2-n/a" when it doesn't mention adios2 at all.
+    require_intent=False (write_bp/read_bp): every call is meant to do real
+    I/O -- the server already opened the Stream for the caller, so never
+    calling .write(/.read( on it is always meaningful. No "n/a" case applies.
+    """
+    if not _check_adios2():
+        return "adios2-fallback"
+    if any(marker in python_code for marker in markers):
+        return "adios2"
+    if require_intent and not any(m in python_code for m in _ADIOS_IMPORT_MARKERS):
+        return "adios2-n/a"
+    return "adios2-unused"
+
+
 # __ Resource Detection ________________________________________________________
 
 def _detect_resources() -> dict:
@@ -240,6 +289,70 @@ except Exception as e:
 """
 
 
+def _wrap_as_bp_stream_task(python_code: str, bp_path: str, mode: str) -> str:
+    """Wrap user code inside a server-opened adios2.Stream(bp_path, mode) context.
+
+    Structural enforcement rather than just detection -- a real Stream object
+    exists regardless of what the user code does, the same idea as
+    pycompss_server.py's _wrap_as_compss_task forcing real @task usage, adapted
+    for an I/O library (one open call-site) instead of a task scheduler.
+    """
+    return f"""\
+import sys, os, traceback
+import adios2
+
+os.makedirs("{DEFAULT_WORK_DIR}", exist_ok=True)
+os.chdir("{DEFAULT_WORK_DIR}")
+
+try:
+    with adios2.Stream("{bp_path}", "{mode}") as stream:
+{_indent(python_code, 8)}
+    print("__TASK_SUCCESS__")
+except Exception as e:
+    print(f"__TASK_FAILED__: {{e}}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+"""
+
+
+def _run_and_finalize(task_id: str, name: str, wrapped_script: str,
+                       timeout: int, engine: str, work_dir: str = DEFAULT_WORK_DIR,
+                       depends_on: list[str] | None = None) -> dict:
+    """Shared tail for submit_task/write_bp/read_bp: register, run, update status,
+    and build the response dict. Returns the dict (caller still json.dumps's it)."""
+    _tasks[task_id] = {
+        "name": name,
+        "status": "running",
+        "depends_on": depends_on or [],
+        "submitted_at": time.time(),
+        "engine": engine,
+    }
+
+    result = _run_python_script(wrapped_script, work_dir=work_dir, timeout=timeout)
+
+    if result["exit_code"] == 0 and "__TASK_SUCCESS__" in result["stdout"]:
+        _tasks[task_id]["status"] = "completed"
+        _tasks[task_id]["exit_code"] = 0
+        _tasks[task_id]["stdout"] = result["stdout"].replace("__TASK_SUCCESS__", "").strip()
+        _tasks[task_id]["stderr"] = result["stderr"]
+    else:
+        _tasks[task_id]["status"] = "failed"
+        _tasks[task_id]["exit_code"] = result["exit_code"]
+        _tasks[task_id]["stdout"] = result["stdout"]
+        _tasks[task_id]["stderr"] = result["stderr"]
+    _tasks[task_id]["completed_at"] = time.time()
+
+    return {
+        "task_id": task_id,
+        "name": name,
+        "status": _tasks[task_id]["status"],
+        "exit_code": result["exit_code"],
+        "stdout": result["stdout"][:3000],
+        "stderr": result["stderr"][:3000],
+        "engine": engine,
+    }
+
+
 # __ MCP Tools _________________________________________________________________
 
 @mcp.tool()
@@ -283,45 +396,18 @@ def submit_task(
                     "error": f"Dependency {dep_id} has status '{_tasks[dep_id]['status']}', not 'completed'",
                 })
 
-    # Register task
-    _tasks[task_id] = {
-        "name": name,
-        "status": "running",
-        "depends_on": depends_on or [],
-        "submitted_at": time.time(),
-        "engine": "adios2" if _check_adios2() else "adios2-fallback",
-    }
-
     # Resolve /app/ path aliases in user code so os.chdir("/app/work/run0") etc. work
     resolved_code = _resolve_paths(python_code)
 
-    # Wrap and execute
+    # Classify on the code as actually submitted (pre-resolution -- path
+    # substitution can't change whether an API marker is present) before
+    # wrapping, so a fallback/unused verdict is independent of the wrapper.
+    engine = _adios_engine_state(python_code)
+
     wrapped_script = _wrap_as_adios_task(resolved_code)
-    result = _run_python_script(wrapped_script, timeout=timeout)
-
-    # Update task status
-    if result["exit_code"] == 0 and "__TASK_SUCCESS__" in result["stdout"]:
-        _tasks[task_id]["status"] = "completed"
-        _tasks[task_id]["exit_code"] = 0
-        _tasks[task_id]["stdout"] = result["stdout"].replace("__TASK_SUCCESS__", "").strip()
-        _tasks[task_id]["stderr"] = result["stderr"]
-    else:
-        _tasks[task_id]["status"] = "failed"
-        _tasks[task_id]["exit_code"] = result["exit_code"]
-        _tasks[task_id]["stdout"] = result["stdout"]
-        _tasks[task_id]["stderr"] = result["stderr"]
-
-    _tasks[task_id]["completed_at"] = time.time()
-
-    return json.dumps({
-        "task_id": task_id,
-        "name": name,
-        "status": _tasks[task_id]["status"],
-        "exit_code": result["exit_code"],
-        "stdout": result["stdout"][:3000],
-        "stderr": result["stderr"][:3000],
-        "engine": _tasks[task_id]["engine"],
-    }, indent=2)
+    response = _run_and_finalize(task_id, name, wrapped_script, timeout, engine,
+                                  depends_on=depends_on)
+    return json.dumps(response, indent=2)
 
 
 @mcp.tool()
@@ -366,6 +452,84 @@ def submit_shell_task(
         "stdout": result["stdout"][:3000],
         "stderr": result["stderr"][:3000],
     }, indent=2)
+
+
+@mcp.tool()
+def write_bp(name: str, bp_path: str, python_code: str, timeout: int = 1800) -> str:
+    """Write data to a BP file using a real, server-opened adios2.Stream.
+
+    python_code runs with `stream` already bound to an open
+    adios2.Stream(bp_path, "w") -- call stream.write(var_name, data, shape, start, count)
+    and stream.write_attribute(...) on it directly. Do NOT open your own Stream or
+    import adios2 yourself; the server already did both -- writing your own
+    `with adios2.Stream(...)` here would open the same file twice.
+
+    Requires ADIOS2 to be installed. Check the "engine" field in the response:
+    "adios2-fallback" means ADIOS2 isn't available here -- use submit_task with
+    plain numpy file I/O instead. "adios2-unused" means ADIOS2 was available but
+    your code never called stream.write(...) -- the file won't have real data in it.
+
+    Args:
+        name: Descriptive name for this task
+        bp_path: Output .bp path (supports /app/ paths)
+        python_code: Code that calls stream.write(...)/stream.write_attribute(...)
+        timeout: Max seconds to wait (default: 1800)
+    """
+    task_id = f"task_{uuid.uuid4().hex[:8]}"
+
+    if not _check_adios2():
+        return json.dumps({
+            "task_id": task_id, "status": "rejected", "engine": "adios2-fallback",
+            "error": "ADIOS2 is not available in this environment -- use submit_task "
+                     "with plain numpy file I/O instead.",
+        }, indent=2)
+
+    resolved_bp = _resolve_paths(bp_path)
+    resolved_code = _resolve_paths(python_code)
+    engine = _adios_engine_state(python_code, _STREAM_USAGE_MARKERS, require_intent=False)
+
+    wrapped_script = _wrap_as_bp_stream_task(resolved_code, resolved_bp, "w")
+    response = _run_and_finalize(task_id, name, wrapped_script, timeout, engine)
+    response["bp_path"] = resolved_bp
+    return json.dumps(response, indent=2)
+
+
+@mcp.tool()
+def read_bp(name: str, bp_path: str, python_code: str, timeout: int = 1800) -> str:
+    """Read data from a BP file using a real, server-opened adios2.Stream.
+
+    python_code runs with `stream` already bound to an open
+    adios2.Stream(bp_path, "r") -- iterate `for _ in stream.steps():` and call
+    stream.read(var_name)/stream.read_attribute(...) on it directly. Do NOT open
+    your own Stream or import adios2 yourself; the server already did both.
+
+    Requires ADIOS2 to be installed. Check the "engine" field in the response:
+    "adios2-fallback" means ADIOS2 isn't available here. "adios2-unused" means
+    your code never called stream.read(...) -- you read nothing from the file.
+
+    Args:
+        name: Descriptive name for this task
+        bp_path: Input .bp path to read (supports /app/ paths)
+        python_code: Code that calls stream.read(...)/stream.read_attribute(...)
+        timeout: Max seconds to wait (default: 1800)
+    """
+    task_id = f"task_{uuid.uuid4().hex[:8]}"
+
+    if not _check_adios2():
+        return json.dumps({
+            "task_id": task_id, "status": "rejected", "engine": "adios2-fallback",
+            "error": "ADIOS2 is not available in this environment -- use submit_task "
+                     "with plain numpy file I/O instead.",
+        }, indent=2)
+
+    resolved_bp = _resolve_paths(bp_path)
+    resolved_code = _resolve_paths(python_code)
+    engine = _adios_engine_state(python_code, _STREAM_USAGE_MARKERS, require_intent=False)
+
+    wrapped_script = _wrap_as_bp_stream_task(resolved_code, resolved_bp, "r")
+    response = _run_and_finalize(task_id, name, wrapped_script, timeout, engine)
+    response["bp_path"] = resolved_bp
+    return json.dumps(response, indent=2)
 
 
 @mcp.tool()

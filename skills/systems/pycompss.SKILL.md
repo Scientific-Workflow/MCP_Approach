@@ -15,6 +15,33 @@ optimization, and heterogeneous resource management.
 
 ---
 
+## READ THIS FIRST: `submit_task` Already Wraps Your Code
+
+In the MCP tool-calling architecture, `submit_task`'s `python_code` is
+**already wrapped with `@task`/`compss_start()`/`compss_wait_on()`/
+`compss_stop()` by the server itself** before it runs
+(`servers/pycompss_server.py`: `_wrap_as_compss_task()` injects this
+automatically around every submitted script). This happens for every task,
+with zero code from you.
+
+**Never write `compss_start()`, `@task`, `compss_wait_on()`, or
+`compss_stop()` inside the `python_code` string you pass to `submit_task`.**
+That would double-initialize a runtime that's already managing the script's
+own lifecycle -- the server's own comment on this is explicit: launching an
+already-self-wrapped script through another layer of COMPSs orchestration
+"double-initializes the runtime."
+
+**For several independent units of work** (e.g. one render per output
+file), don't try to build that concurrency yourself with `@task` inside one
+`submit_task` call -- call `submit_task` **multiple times** instead, once per
+unit of work, as separate tool calls with plain Python in each. Real
+parallelism, zero PyCOMPSs code written by you.
+
+The API reference below describes what the *server* does under the hood, for
+understanding -- it is not a template to copy into `python_code`.
+
+---
+
 ## Key API
 
 ```python
@@ -58,8 +85,11 @@ compss_stop()
 
 The PyCOMPSs MCP server (`servers/pycompss_server.py`) operates in two modes:
 
-1. **COMPSs mode** (runtime available): Tasks are wrapped with `@task` decorator,
-   executed via `runcompss`, and synchronized with `compss_wait_on()`.
+1. **COMPSs mode** (runtime available): Tasks are wrapped with `@task` decorator
+   and synchronized with `compss_wait_on()`, then run via plain `VENV_PYTHON`
+   (never `runcompss` -- the wrapped script self-manages `compss_start()`/
+   `compss_stop()` in "direct" link mode; launching that through `runcompss`
+   too would double-initialize the runtime).
 
 2. **Fallback mode** (runtime NOT available): Tasks execute as plain Python scripts.
    Same result, just no COMPSs orchestration. This allows development and testing

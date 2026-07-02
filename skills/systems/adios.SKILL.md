@@ -16,6 +16,34 @@ and in-memory (DataMan) data exchange.
 
 ---
 
+## READ THIS FIRST: Use `write_bp`/`read_bp`, Not Raw `submit_task`
+
+Unlike Parsl/PyCOMPSs, the server **cannot** force real ADIOS2 usage the way
+`@python_app`/`@task` wrapping does -- ADIOS2 is an I/O library, not a task
+scheduler, so there's no single call-site to wrap around arbitrary code.
+`submit_task` only pre-imports `adios2`; it does nothing to stop you from
+importing it and then never calling it.
+
+**Prefer `write_bp(name, bp_path, python_code)` / `read_bp(name, bp_path,
+python_code)` instead of `submit_task` for any real ADIOS2 I/O.** These tools
+have the server open a real `adios2.Stream(bp_path, "w"/"r")` for you --
+`python_code` runs with `stream` already bound to it. Call
+`stream.write(...)`/`stream.write_attribute(...)` (write mode) or
+`stream.read(...)`/`stream.read_attribute(...)` (read mode) on it directly.
+**Do not open your own Stream or `import adios2` yourself inside that code --
+the server already did both.**
+
+This is checked, not just suggested: every `submit_task`/`write_bp`/`read_bp`
+call reports an `"engine"` field (see "MCP Server Behavior" below for the
+full 4-state breakdown). The one that matters for `write_bp`/`read_bp`:
+`"adios2-unused"` means ADIOS2 was available but your code never called the
+pre-opened Stream -- even inside `write_bp`/`read_bp`'s wrapper, if you never
+call `.write(`/`.read(` on it, you'll still get `"adios2-unused"`. This is
+recorded in the trace and the orchestrator routes back to you if it sees
+`"adios2-unused"` on a task that should have done real I/O.
+
+---
+
 ## Key API
 
 ```python
@@ -71,18 +99,33 @@ writer.close()
 
 ## MCP Server Behavior
 
-The ADIOS2 MCP server (`servers/adios_server.py`) operates in two modes:
+The ADIOS2 MCP server (`servers/adios_server.py`) operates in four states,
+reported via the `engine` field on every `submit_task`/`write_bp`/`read_bp`
+response:
 
-1. **ADIOS2 mode** (runtime available): Tasks have `import adios2` pre-loaded,
-   can use BP files and streaming for inter-task data transport.
-
-2. **Fallback mode** (runtime NOT available): Tasks execute as plain Python
-   scripts using numpy file I/O (.npy/.npz) instead of ADIOS2 BP files.
-   Same computational result, just without ADIOS2's I/O optimizations.
-
-The `engine` field in task results indicates which mode was used:
-- `"engine": "adios2"` -- ADIOS2 runtime was used
-- `"engine": "adios2-fallback"` -- numpy file I/O fallback
+1. **`"adios2"`** -- ADIOS2 is installed AND the submitted code actually
+   called a real API (`adios2.open`/`Stream`/`.declare_io`/`.begin_step`/
+   `.end_step`/`.write(`/`.read(`, etc., depending on the tool). This is the
+   only state that means real ADIOS2 I/O actually happened.
+2. **`"adios2-unused"`** -- ADIOS2 is installed, the code shows intent to use
+   it (an `import adios2` for `submit_task`, or just being inside `write_bp`/
+   `read_bp`'s pre-opened Stream at all), but no real API call was detected
+   (`adios_server.py::_adios_engine_state` scans for it). This is the exact
+   "imported but never used" failure mode -- treat it as a task that needs to
+   be redone, not a success.
+3. **`"adios2-n/a"`** -- `submit_task`/`submit_shell_task`/`submit_mpi_task`
+   only: ADIOS2 is installed but the code has nothing to do with it at all (no
+   `import adios2`). Most tasks in an ADIOS run (LAMMPS, OVITO, rendering,
+   GIF assembly, ...) legitimately fall here -- this is NOT a warning, it
+   just means ADIOS2 usage wasn't expected for that task. Only
+   `"adios2-unused"` (intent shown, never followed through) is a real
+   problem. `write_bp`/`read_bp` never report this state -- every call to
+   them is meant to do real I/O, so not calling `.write(`/`.read(` is always
+   `"adios2-unused"`, never `"n/a"`.
+4. **`"adios2-fallback"`** -- ADIOS2 isn't installed in this environment at
+   all. Tasks execute as plain Python using numpy file I/O (.npy/.npz)
+   instead of BP files -- same computational result, just without ADIOS2.
+   Not your fault if you see this; it's an environment/install gap.
 
 ---
 

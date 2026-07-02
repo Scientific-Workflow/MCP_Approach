@@ -2,8 +2,9 @@
 name: use_cases/cosmology/explorer
 description: >
   Use-case-specific explorer rules for the HACC cosmology workflow (Last Journey
-  sample run). Covers real qsub PBS submission, GenericIO reading via CLI tools
-  (no pygio), halo catalog parsing, density-slice rendering, and known pitfalls.
+  sample run). Covers building a single PBS script that runs the producer AND the
+  analysis/rendering together in one qsub submission -- GenericIO reading via CLI
+  tools (no pygio), halo catalog parsing, and known pitfalls.
 ---
 
 # Cosmology (HACC) — Explorer Skill
@@ -16,55 +17,151 @@ slice visualization), based on "The Last Journey" sample run.
 
 ## When to Use This Skill
 
-Load this whenever the explorer is executing a workflow that submits/reads a HACC
-run (paths under `/lcrc/project/PEDAL/jacoboh/HACC/`, `qsub`/`qstat`, GenericIO
-snapshots, FOF/SOD halo catalogs).
+Load this whenever the explorer is executing a workflow that runs/reads a HACC
+run (paths under `/lcrc/project/PEDAL/jacoboh/HACC/`, GenericIO snapshots, FOF/SOD
+halo catalogs).
 
 ---
 
 ## The Simulation Is a Private Black Box
 
 The HACC executable (`hacc_tpm`) is closed-source. Never try to read, regenerate, or
-reimplement its physics. Treat it purely as: submit the existing PBS script, wait for
-it to finish, read its output. Do not modify `subme.pbs` or `params/indat.params`.
+reimplement its physics. Treat it purely as: run the existing binary, wait for it to
+finish, read its output. Do not modify `params/indat.params`.
 
 ---
 
-## Stage 1: Submit the Simulation (real qsub — this is an explicit exception)
+## Overall Shape: One PBS Script, Sim + Vis Together
 
-**This is the one use case where submitting a brand-new PBS batch job via `qsub` is
-allowed**, even from inside an already-running interactive PBS allocation. This
-deliberately overrides the general LCRC rule ("never submit a new PBS job — run
-inside the existing allocation instead"); that general rule still applies to every
-other use case.
+The producer and the analysis/visualization go in **one PBS script** — a single
+`qsub` submission that runs the simulation and then renders the final image. Do not
+develop or test the analysis code against `SampleRun_go/output/full_snapshots/` or
+`SampleRun_go/analysis/haloproperties/` content that's already sitting there from
+some prior run — that's someone else's leftover output, not this run's, and this
+run's result should never depend on it. Write the analysis/rendering script directly
+from the documented GenericIO format and halo-selection rules below, informed by
+this run's own `params/indat.params` (config, not output), then embed it in the PBS
+script alongside the producer.
+
+---
+
+## Stage 1: Explore the Case (config only, not old output)
+
+`list_files`/explore `SampleRun_go/` (list `subme.pbs`, `params/`, `output/`,
+`analysis/` -- just to confirm they exist, not to read snapshot/halo content from
+them). Config values (FOF linking length, SOD Delta, box size `RL`, grid size `NG`)
+live in `params/indat.params` and `params/cosmotools-config.dat` — read them, never
+hardcode values from the paper without confirming they match this sample run. These
+are this run's own input configuration, not another run's results, so reading them
+is fine.
+
+---
+
+## Stage 2: Write the Analysis/Rendering Script
+
+Write `/app/work/run0/analyze_and_render.py` directly, using the documented
+GenericIOPrint format and halo-selection rules ("Reading Snapshot & Halo Data" and
+"Computing and Rendering the Density Slice" below) and the config values read in
+Stage 1 -- not by reading or testing against any pre-existing snapshot/halo catalog
+content. This script must use **real absolute paths**, not `/app/`-prefixed ones —
+`/app/` paths are only resolved by the MCP tool layer, and this script runs
+standalone (invoked directly by the PBS job, no MCP tools involved) — so its output
+paths should be the real path to this repo's `work/run0/` directory (confirm the
+repo root with `pwd`/`list_files` if unsure), and its input paths should be the real
+`SampleRun_go/output/...`/`analysis/...` paths (where *this job's own* producer run
+will write, once it executes).
+
+---
+
+## Stage 3: Build and Submit One PBS Job (producer + analysis, single qsub)
+
+Read `SampleRun_go/subme.pbs` first, but only as a reference for the executable path,
+env file, and param file location; then write a new script with those paths, the
+task's `WALLTIME`/`NRANKS` parameters, and a call to the Stage 2 script:
+
+```bash
+#!/bin/bash
+#PBS -A PEDAL
+#PBS -l walltime=<WALLTIME>
+#PBS -l select=1:mpiprocs=<NRANKS>
+#PBS -l place=scatter
+#PBS -N agent_hacc_run
+#PBS -j oe
+
+set -e
+cd $PBS_O_WORKDIR
+
+exe=/lcrc/project/PEDAL/jacoboh/HACC/HACC_go/improv.cpu/mpi/bin/hacc_tpm
+envfile=/lcrc/project/PEDAL/jacoboh/HACC/HACC_go/env/bashrc.improv.cpu
+paramfile=./params/indat.params
+source $envfile
+
+NNODES=1
+NRANKS=<NRANKS>
+NTHREADS=1
+NTOTRANKS=$(( NNODES * NRANKS ))
+
+mpiexec -np ${NTOTRANKS} \
+  --map-by ppr:${NRANKS}:node \
+  --bind-to core \
+  -x OMP_NUM_THREADS=${NTHREADS} \
+  $exe $paramfile -n
+
+# Analysis + visualization -- runs in the same job, right after the producer.
+# Use the venv's real absolute python3 path (this script is invoked directly by
+# PBS, not through the MCP tool layer, so no /app/ shortcuts here either).
+<VENV_PYTHON_ABS_PATH> <REPO_ROOT_ABS_PATH>/work/run0/analyze_and_render.py
+```
+
+- `WALLTIME`/`NRANKS` come from the task (the user may override them); if the task
+  doesn't specify either, default to `01:00:00` / `8` — the values confirmed working
+  for this sample run's 2x2x2 decomposition.
+- `<VENV_PYTHON_ABS_PATH>` is this repo's `venv3/bin/python3`, by its real absolute
+  path (e.g. confirm with `list_files`/`read_file` if unsure of the exact repo root)
+  — do not invoke bare `python3`, it may resolve to a different interpreter once
+  `envfile` has been sourced.
+- Write the generated script to `/app/work/run0/agent_subme.pbs` first — this is the
+  canonical, tracked copy of what was actually submitted, and it must exist in the
+  work dir alongside the rest of this run's artifacts. Then copy that same file into
+  `SampleRun_go/agent_subme.pbs` (e.g. `cp /app/work/run0/agent_subme.pbs
+  /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/agent_subme.pbs` via `submit_shell_task`)
+  — never overwrite the original `subme.pbs`.
+- Must `cd`/submit from `SampleRun_go/` (not the work dir) so `$PBS_O_WORKDIR` resolves
+  and `./params/indat.params` is found relatively:
 
 ```
 submit_shell_task(
     name="submit_hacc_job",
-    command="cd /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go && qsub subme.pbs",
+    command="cd /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go && qsub agent_subme.pbs",
 )
 ```
 
-- Must `cd` into `SampleRun_go/` **before** `qsub` — the script does `cd $PBS_O_WORKDIR`
-  and references `./params/indat.params` relatively, so `$PBS_O_WORKDIR` must equal
-  `SampleRun_go/`.
 - Capture the returned job ID, then poll with `qstat <job_id>` via `submit_shell_task`
-  until the state is `C` (completed). Do not busy-loop with zero delay — space polls out.
-- Job uses 8 MPI ranks (2x2x2 decomposition), `walltime=01:00:00`, job name
-  `runme_mini_8r`, merged stdout+stderr (`-j oe`) written to `SampleRun_go/`.
+  until the state is `C` (completed). Do not busy-loop with zero delay — space polls
+  out.
 
 ---
 
-## Stage 1b: Explore Before Assuming Anything
+## Stage 4: Report, or Recover Without Re-Running the Producer
 
-Before reading output, `list_files`/`submit_shell_task -c "ls -la ..."` the run
-directory. Config values (FOF linking length, SOD Delta, box size `RL`, grid size
-`NG`) live in `params/indat.params` and `params/cosmotools-config.dat` — read them,
-never hardcode values from the paper without confirming they match this sample run.
+After completion, read back `/app/work/run0/dm_density_slice.png` and `summary.txt`
+(written by the embedded script) to confirm they exist and report them.
+
+If they're missing, check the job's `.o<jobid>` log for where it failed:
+- **If the producer (`hacc_tpm`) itself failed**, fix the underlying issue (wrong
+  param path, wrong rank count, etc.) and resubmit the whole `agent_subme.pbs` — the
+  producer has to actually run again to get real output.
+- **If the producer succeeded but the analysis/rendering script failed**, do
+  **not** resubmit the whole job — `hacc_tpm` already wrote real output for this run
+  to `output/full_snapshots/`/`analysis/haloproperties/`. Fix `analyze_and_render.py`
+  and re-run it directly via `submit_shell_task` (the venv's absolute python3 path,
+  same as the PBS script invokes it) against that output. This is still *this run's*
+  own fresh data, not old data from some other run, and it avoids re-queuing the
+  expensive MPI producer just to fix a bug in the analysis code.
 
 ---
 
-## Stage 2: Reading Snapshot & Halo Data — Do NOT use pygio
+## Reading Snapshot & Halo Data — Do NOT use pygio
 
 `pygio` (in-tree at `HACC_go/submodules/genericio/python/pygio`) is **not built** —
 importing it fails with `ModuleNotFoundError: No module named 'pygio._version'`.
@@ -106,8 +203,11 @@ arr = np.array(rows, dtype=np.float64)
 ```python
 HP = "/lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/analysis/haloproperties/step_624/m000p-624.haloproperties"
 ```
-- The catalog **already exists** from a prior run under `analysis/haloproperties/step_<N>/`
-  — do not hand-roll FOF/SOD linking in Python; this file is the halo finder's output.
+- This file is written by HACC's own halo finder as part of the run, under
+  `analysis/haloproperties/step_<N>/` — do not hand-roll FOF/SOD linking in Python;
+  parse this output instead. (This path won't have this run's real content until
+  `hacc_tpm` has actually executed — the analysis script parses whatever is there
+  *when it runs*, i.e. inside the PBS job, after the producer stage.)
 - `GenericIOPrint` on this file gives a tab-separated header line listing ~76 columns
   including `fof_halo_count`, `fof_halo_mass`, `fof_halo_center_x/y/z`,
   `sod_halo_mass`, `sod_halo_radius`, `sod_halo_center_x/y/z`, etc. — parse the header
@@ -121,7 +221,7 @@ HP = "/lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/analysis/haloproperties/step
 
 ---
 
-## Stage 3: Density Slice Visualization
+## Computing and Rendering the Density Slice
 
 Two valid approaches — pick whichever is simpler to get working; both are legitimate:
 
@@ -152,12 +252,16 @@ this is a final human-facing artifact, plain `.png` is correct (no ADIOS2 needed
 
 ## ADIOS2 Engine Notes (when `--engine adios`)
 
-For this workflow specifically, the inter-stage numerical data that the `systems/adios`
-skill's BP-file directive applies to is: the parsed snapshot arrays
-(x,y,z,vx,vy,vz,phi,mass), the halo catalog arrays, and the density-slice grid. The
-final `dm_density_slice.png` and `summary.txt` are human-facing artifacts and stay as
-plain files regardless of engine mode (see that skill for the general producer/consumer
-pattern and fallback behavior).
+`write_bp`/`read_bp` only work through the live MCP session — they open a real
+`adios2.Stream` on the server side in response to a tool call. The `analyze_and_render.py`
+script embedded in the PBS job runs standalone, invoked directly by the batch job
+with no MCP tools involved, so it **cannot** call `write_bp`/`read_bp` — write the
+embedded script's intermediate arrays (x,y,z,vx,vy,vz,phi,mass; halo catalog;
+density-slice grid) as plain `.npz`/numpy I/O instead, regardless of engine. This is
+a real limitation of combining producer and visualization into one non-interactive
+job: real ADIOS2 `Stream` usage requires the live MCP session, which the embedded
+script doesn't have. `dm_density_slice.png` and `summary.txt` were always plain
+human-facing files regardless of engine mode, so that part is unaffected.
 
 ---
 
@@ -168,7 +272,9 @@ pattern and fallback behavior).
 | `pygio` import fails (`No module named 'pygio._version'`) | Expected — it's not built. Use `GenericIOPrint` via `subprocess` instead; do not try to build/install pygio. |
 | GenericIOPrint output has no obvious "mass" column | Mass isn't stored per-particle for this sample run — compute `mp` from `Omega_m`, `rho_crit0`, `RL`, `NP` (see above) and broadcast it. |
 | Picking "most massive halo" by `fof_halo_mass` gives a different halo than expected | Use `sod_halo_mass` (M_200c), excluding rows where `sod_halo_count == -101`. |
-| `qstat` shows the job immediately as gone | A completed PBS job can disappear from `qstat` quickly on some clusters — also check for the `<jobname>.o<jobid>` log file in `SampleRun_go/` as completion evidence, and check the output snapshot directory for fresh files. |
+| Job finishes but `dm_density_slice.png`/`summary.txt` are missing | The embedded script probably failed silently — check the job's `.o<jobid>` log (or add `set -e` before the analysis call in the generated script) rather than assuming the producer itself failed. |
+| Reading/parsing `output/full_snapshots/`/`analysis/haloproperties/` content before this run's own producer has executed | Don't — that's leftover data from some prior run, not this run's own result. Write the analysis script from the documented format/rules, not by testing against old data. |
+| Analysis stage fails inside the job -- tempted to resubmit the whole PBS job | Don't requeue `hacc_tpm` just to fix an analysis bug — the producer's real output for this run already exists on disk. Fix `analyze_and_render.py` and re-run it directly against that output via `submit_shell_task`. |
 | `hacc_slice` slice values look wrong / file size doesn't divide evenly | Check float32 vs float64 assumption first (`NG*NG*4` vs `NG*NG*8` bytes) rather than assuming a fixed dtype. |
 
 ---
@@ -180,4 +286,4 @@ pattern and fallback behavior).
 - `most_massive_halo.npz` / `.txt` — selected halo's M_200c, R_200c, center
 - `density_slice.npy` / `.bp` + metadata — the projected density grid
 - `dm_density_slice.png` — final rendered image (always a plain file, never `.bp`)
-- `summary.txt` — human-readable reproduction summary (job ID, config values used, results)
+- `summary.txt` — human-readable reproduction summary (config values used, results)

@@ -67,6 +67,14 @@ class ToolCallEvent(BaseEvent):
     succeeded: bool
     duration_s: float = 0
     iteration: Optional[int] = None
+    # Workflow-engine usage signal, populated only for submit_task/submit_shell_task/
+    # submit_mpi_task. engine_backend is the raw "engine" string self-reported by the
+    # MCP server (e.g. "parsl-fallback", "adios2"). engine_verified is the derived
+    # bool: for Parsl/PyCOMPSs it means the server's runtime actually dispatched the
+    # task (not a fallback); for ADIOS it means the submitted code called a real
+    # adios2 API, not just imported the package. None when not applicable/checkable.
+    engine_backend: Optional[str] = None
+    engine_verified: Optional[bool] = None
 
 
 class SkillLoadEvent(BaseEvent):
