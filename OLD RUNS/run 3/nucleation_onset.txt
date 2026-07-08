@@ -1,0 +1,5 @@
+total_atoms=4360
+threshold_atoms=545.0
+nucleation_onset_frame=-1
+nucleation_onset_timestep=-1
+note=No frame reached the 1/8 crystallization threshold; no successful nucleation event detected in this short run (consistent with paper: nucleation is stochastic and rare).

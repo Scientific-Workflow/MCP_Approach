@@ -56,6 +56,8 @@ MCP_Approach/
 +-- agent_mcp.py                  <- Main entry point (orchestrator + planner + installer + graph)
 +-- mcp_tools.py                  <- MCP client (connects to MCP server, wraps tool calls)
 +-- mcp_explorer.py               <- Explorer agent (ReAct loop calling MCP server tools)
++-- run_archiver.py               <- Snapshots work/run0 + trace.json after every run, then wipes run0
++-- trace_logger.py / trace_schema.py  <- Per-run tracing (LLM calls, tool calls, routing, metadata)
 +-- servers/
 |   +-- __init__.py
 |   +-- parsl_server.py           <- Parsl Workflow MCP Server
@@ -106,6 +108,38 @@ orchestrator --> planner    --> orchestrator
 
 ---
 
+## Run Archiving
+
+`work/run0/` is a single fixed working directory shared by every run -- the
+next run overwrites whatever the previous one left there. `run_archiver.py`
+snapshots it automatically: right after the trace is saved (on both success
+and failure paths in `agent_mcp.py`), it copies `work/run0/` and the run's
+`trace.json` into a permanent folder **outside this repo**, then clears
+`run0` for the next run.
+
+Archive location: `/gpfs/fs1/home/jacob.oh/SULI/TEST_RUNS/mcp_approach/<folder>/`
+(a `single_approach/` sibling is reserved for when the Artifact approach gets
+the same treatment). Each `<folder>` contains `trace.json` and a `work/`
+subfolder with everything that was in `run0`.
+
+Folder naming: `<date>__<usecase>__<engine>__<condition>__<combination>__trial<trial>`
+
+- `date` -- `YYYYMMDD` from the run's `run_id`
+- `usecase` -- `--domain` if passed, else falls back to the paper's slug
+- `engine` -- `--engine` (parsl/pycompss/adios)
+- `condition` -- `--condition` (A/B/C, the skills/architecture ablation)
+- `combination` -- **new required `--combination {a,b,c,d}` flag**: labels
+  which planner inputs were actually used this run --
+  a=PDF+Image+Desc, b=PDF+Desc, c=Image+Desc, d=Desc Only.
+  (`--paper` is currently mandatory, so only a/b are reachable today; c/d
+  become usable if paper selection is ever made optional.)
+- `trial` -- `--trial`
+
+Name collisions get a Windows-style ` (2)`, ` (3)`, ... suffix rather than
+being overwritten.
+
+---
+
 ## MCP Server Tools (exposed by servers/parsl_server.py)
 
 | Tool | Description |
@@ -130,7 +164,7 @@ To add a new engine (e.g. PyCOMPSs):
 1. Create `servers/pycompss_server.py` implementing the same tool interface
 2. Add `"pycompss"` to the ENGINE_SERVERS dict in `mcp_tools.py`
 3. Add `"pycompss"` to the `--engine` choices in `agent_mcp.py`
-4. Run with `python agent_mcp.py --engine pycompss --paper 1 --goal "..."`
+4. Run with `python agent_mcp.py --engine pycompss --paper 1 --combination b --goal "..."`
 
 The explorer, orchestrator, planner, and installer are completely unchanged.
 
@@ -139,11 +173,11 @@ The explorer, orchestrator, planner, and installer are completely unchanged.
 ## Running the System
 
 ```bash
-# With Parsl engine (default)
-python agent_mcp.py --paper 1 --goal "Reproduce this workflow using LAMMPS and OVITO"
+# With Parsl engine (default). --combination is required (a/b/c/d, see Run Archiving above)
+python agent_mcp.py --paper 1 --combination b --goal "Reproduce this workflow using LAMMPS and OVITO"
 
 # Specify engine explicitly
-python agent_mcp.py --engine parsl --paper 1 --goal "..."
+python agent_mcp.py --engine parsl --paper 1 --combination b --goal "..."
 ```
 
 ---

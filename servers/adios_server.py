@@ -15,7 +15,7 @@ between pipeline stages. When ADIOS2 is NOT available, tasks fall back to
 numpy file I/O (.npy/.npz) — same result, just without ADIOS2 optimizations.
 
 This server executes tasks locally (or in a virtual environment) using subprocess.
-No Docker required. Compatible with HPC environments where ADIOS2 is installed.
+Compatible with HPC environments where ADIOS2 is installed.
 
 The VENV_PYTHON environment variable controls which Python interpreter to use.
 
@@ -79,6 +79,115 @@ def _check_adios2() -> bool:
     return _adios2_available
 
 
+# __ Real ADIOS2 Usage Verification ____________________________________________
+# Unlike PyCOMPSs's @task wrapping, the server can't structurally force ADIOS2
+# usage for arbitrary submit_task code -- it's an I/O library, not a task
+# scheduler, so there's no single call-site to wrap. This is the server-side
+# source of truth for whether submitted code actually called a real API, as
+# opposed to just having `adios2` importable. The "engine" field below is what
+# the explorer's trace classifier (mcp_explorer.py) reads -- it no longer does
+# its own content scan, this is now the single place that logic lives.
+
+_ADIOS_API_MARKERS = (
+    "adios2.open(", ".declare_io(", ".set_engine(", "adios2.ADIOS(",
+    ".begin_step(", ".end_step(", "adios2.Stream(", ".Stream(",
+)
+# write_bp/read_bp pre-open the Stream themselves (see _wrap_as_bp_stream_task),
+# so what matters there is whether the user code calls a method on it, not
+# whether it opened one.
+_STREAM_USAGE_MARKERS = (".write(", ".read(", ".write_attribute(", ".read_attribute(")
+_ADIOS_IMPORT_MARKERS = ("import adios2", "from adios2")
+
+
+def _adios_engine_state(python_code: str, markers: tuple = _ADIOS_API_MARKERS,
+                         require_intent: bool = True) -> str:
+    """Classify real ADIOS2 usage for the "engine" field:
+    - "adios2-fallback": package unavailable
+    - "adios2-n/a":      package available, but the code shows no intent to use
+                          it (no adios2 import) -- most submit_task calls in an
+                          ADIOS run (LAMMPS, OVITO, rendering, ...) have nothing
+                          to do with ADIOS2 at all, and flagging those as
+                          "unused" would be noise, not a real signal.
+    - "adios2-unused":   intent shown (an import, or for write_bp/read_bp just
+                          being called at all) but no real API call found
+    - "adios2":          package available and genuinely used
+
+    require_intent=True (submit_task/submit_shell_task/submit_mpi_task): only
+    "adios2-unused" when the code actually tries to touch adios2 but never
+    calls its API; "adios2-n/a" when it doesn't mention adios2 at all.
+    require_intent=False (write_bp/read_bp): every call is meant to do real
+    I/O -- the server already opened the Stream for the caller, so never
+    calling .write(/.read( on it is always meaningful. No "n/a" case applies.
+    """
+    if not _check_adios2():
+        return "adios2-fallback"
+    if any(marker in python_code for marker in markers):
+        return "adios2"
+    if require_intent and not any(m in python_code for m in _ADIOS_IMPORT_MARKERS):
+        return "adios2-n/a"
+    return "adios2-unused"
+
+
+# __ Resource Detection ________________________________________________________
+
+def _detect_resources() -> dict:
+    """Read available compute resources from PBS env vars or local fallback."""
+    import shutil
+
+    in_pbs = bool(os.environ.get("PBS_JOBID"))
+
+    nodefile = os.environ.get("PBS_NODEFILE", "")
+    nodelist = ""
+    nodefile_hosts: list[str] = []
+    if nodefile and os.path.isfile(nodefile):
+        with open(nodefile) as _nf:
+            nodefile_hosts = _nf.read().split()
+        nodelist = ",".join(sorted(set(nodefile_hosts)))
+
+    if nodefile_hosts:
+        nnodes = len(set(nodefile_hosts))
+        ntasks_from_file = len(nodefile_hosts)
+        if ntasks_from_file == nnodes:
+            pbs_np  = int(os.environ.get("PBS_NP",      0))
+            pbs_ppn = int(os.environ.get("PBS_NUM_PPN", 0))
+            ntasks  = pbs_np if pbs_np > 0 else (nnodes * pbs_ppn if pbs_ppn > 0 else ntasks_from_file)
+        else:
+            ntasks = ntasks_from_file
+        cpus_per = ntasks // max(nnodes, 1)
+    else:
+        nnodes   = int(os.environ.get("PBS_NUM_NODES", 1))
+        ntasks   = int(os.environ.get("PBS_NP",        1))
+        cpus_per = int(os.environ.get("PBS_NUM_PPN",   1))
+
+    launcher = os.environ.get("MPI_LAUNCHER", "")
+    if not launcher:
+        if shutil.which("mpirun"):
+            launcher = "mpirun"
+        elif shutil.which("mpiexec"):
+            launcher = "mpiexec"
+        else:
+            launcher = ""
+
+    warning = ""
+    if not in_pbs:
+        warning = (
+            "NOT inside a PBS job (PBS_JOBID not set). "
+            "MPI tasks and multi-node execution are unavailable. "
+            "If running on HPC, start an interactive PBS job before launching the agent: "
+            "qsub -I -l nodes=N:ppn=M -l walltime=HH:MM:SS -A <project>"
+        )
+
+    return {
+        "in_pbs":        in_pbs,
+        "nnodes":        nnodes,
+        "ntasks":        ntasks,
+        "cpus_per_task": cpus_per,
+        "nodelist":      nodelist,
+        "launcher":      launcher,
+        "warning":       warning,
+    }
+
+
 # __ Task Registry _____________________________________________________________
 
 _tasks: dict[str, dict] = {}
@@ -118,17 +227,20 @@ def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int 
 
 
 def _run_python_script(script: str, work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
-    """Write a Python script to a temp file and execute it."""
-    os.makedirs(work_dir, exist_ok=True)
+    """Write a Python script to a file and execute it.
 
-    fd, script_path = tempfile.mkstemp(suffix=".py", prefix="_mcp_adios_task_", dir=work_dir)
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(script)
-        return _run_command([VENV_PYTHON, script_path], work_dir=work_dir, timeout=timeout)
-    finally:
-        if os.path.isfile(script_path):
-            os.remove(script_path)
+    Kept (not deleted after running) in _task_scripts/ so the actual code submitted
+    to this engine -- including the ADIOS2 read/write wrapping _wrap_as_adios_task()
+    injects -- is inspectable after the run, not just visible in the trace.json args
+    field.
+    """
+    scripts_dir = os.path.join(work_dir, "_task_scripts")
+    os.makedirs(scripts_dir, exist_ok=True)
+
+    fd, script_path = tempfile.mkstemp(suffix=".py", prefix="task_", dir=scripts_dir)
+    with os.fdopen(fd, "w") as f:
+        f.write(script)
+    return _run_command([VENV_PYTHON, script_path], work_dir=work_dir, timeout=timeout)
 
 
 def _wrap_as_adios_task(python_code: str) -> str:
@@ -177,6 +289,70 @@ except Exception as e:
 """
 
 
+def _wrap_as_bp_stream_task(python_code: str, bp_path: str, mode: str) -> str:
+    """Wrap user code inside a server-opened adios2.Stream(bp_path, mode) context.
+
+    Structural enforcement rather than just detection -- a real Stream object
+    exists regardless of what the user code does, the same idea as
+    pycompss_server.py's _wrap_as_compss_task forcing real @task usage, adapted
+    for an I/O library (one open call-site) instead of a task scheduler.
+    """
+    return f"""\
+import sys, os, traceback
+import adios2
+
+os.makedirs("{DEFAULT_WORK_DIR}", exist_ok=True)
+os.chdir("{DEFAULT_WORK_DIR}")
+
+try:
+    with adios2.Stream("{bp_path}", "{mode}") as stream:
+{_indent(python_code, 8)}
+    print("__TASK_SUCCESS__")
+except Exception as e:
+    print(f"__TASK_FAILED__: {{e}}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+"""
+
+
+def _run_and_finalize(task_id: str, name: str, wrapped_script: str,
+                       timeout: int, engine: str, work_dir: str = DEFAULT_WORK_DIR,
+                       depends_on: list[str] | None = None) -> dict:
+    """Shared tail for submit_task/write_bp/read_bp: register, run, update status,
+    and build the response dict. Returns the dict (caller still json.dumps's it)."""
+    _tasks[task_id] = {
+        "name": name,
+        "status": "running",
+        "depends_on": depends_on or [],
+        "submitted_at": time.time(),
+        "engine": engine,
+    }
+
+    result = _run_python_script(wrapped_script, work_dir=work_dir, timeout=timeout)
+
+    if result["exit_code"] == 0 and "__TASK_SUCCESS__" in result["stdout"]:
+        _tasks[task_id]["status"] = "completed"
+        _tasks[task_id]["exit_code"] = 0
+        _tasks[task_id]["stdout"] = result["stdout"].replace("__TASK_SUCCESS__", "").strip()
+        _tasks[task_id]["stderr"] = result["stderr"]
+    else:
+        _tasks[task_id]["status"] = "failed"
+        _tasks[task_id]["exit_code"] = result["exit_code"]
+        _tasks[task_id]["stdout"] = result["stdout"]
+        _tasks[task_id]["stderr"] = result["stderr"]
+    _tasks[task_id]["completed_at"] = time.time()
+
+    return {
+        "task_id": task_id,
+        "name": name,
+        "status": _tasks[task_id]["status"],
+        "exit_code": result["exit_code"],
+        "stdout": result["stdout"][:3000],
+        "stderr": result["stderr"][:3000],
+        "engine": engine,
+    }
+
+
 # __ MCP Tools _________________________________________________________________
 
 @mcp.tool()
@@ -220,42 +396,18 @@ def submit_task(
                     "error": f"Dependency {dep_id} has status '{_tasks[dep_id]['status']}', not 'completed'",
                 })
 
-    # Register task
-    _tasks[task_id] = {
-        "name": name,
-        "status": "running",
-        "depends_on": depends_on or [],
-        "submitted_at": time.time(),
-        "engine": "adios2" if _check_adios2() else "adios2-fallback",
-    }
+    # Resolve /app/ path aliases in user code so os.chdir("/app/work/run0") etc. work
+    resolved_code = _resolve_paths(python_code)
 
-    # Wrap and execute
-    wrapped_script = _wrap_as_adios_task(python_code)
-    result = _run_python_script(wrapped_script, timeout=timeout)
+    # Classify on the code as actually submitted (pre-resolution -- path
+    # substitution can't change whether an API marker is present) before
+    # wrapping, so a fallback/unused verdict is independent of the wrapper.
+    engine = _adios_engine_state(python_code)
 
-    # Update task status
-    if result["exit_code"] == 0 and "__TASK_SUCCESS__" in result["stdout"]:
-        _tasks[task_id]["status"] = "completed"
-        _tasks[task_id]["exit_code"] = 0
-        _tasks[task_id]["stdout"] = result["stdout"].replace("__TASK_SUCCESS__", "").strip()
-        _tasks[task_id]["stderr"] = result["stderr"]
-    else:
-        _tasks[task_id]["status"] = "failed"
-        _tasks[task_id]["exit_code"] = result["exit_code"]
-        _tasks[task_id]["stdout"] = result["stdout"]
-        _tasks[task_id]["stderr"] = result["stderr"]
-
-    _tasks[task_id]["completed_at"] = time.time()
-
-    return json.dumps({
-        "task_id": task_id,
-        "name": name,
-        "status": _tasks[task_id]["status"],
-        "exit_code": result["exit_code"],
-        "stdout": result["stdout"][:3000],
-        "stderr": result["stderr"][:3000],
-        "engine": _tasks[task_id]["engine"],
-    }, indent=2)
+    wrapped_script = _wrap_as_adios_task(resolved_code)
+    response = _run_and_finalize(task_id, name, wrapped_script, timeout, engine,
+                                  depends_on=depends_on)
+    return json.dumps(response, indent=2)
 
 
 @mcp.tool()
@@ -274,7 +426,7 @@ def submit_shell_task(
         timeout: Max seconds to wait
     """
     task_id = f"task_{uuid.uuid4().hex[:8]}"
-    _work = work_dir if work_dir else DEFAULT_WORK_DIR
+    _work = _resolve_paths(work_dir) if work_dir else DEFAULT_WORK_DIR
 
     _tasks[task_id] = {
         "name": name,
@@ -299,6 +451,261 @@ def submit_shell_task(
         "exit_code": result["exit_code"],
         "stdout": result["stdout"][:3000],
         "stderr": result["stderr"][:3000],
+    }, indent=2)
+
+
+@mcp.tool()
+def write_bp(name: str, bp_path: str, python_code: str, timeout: int = 1800) -> str:
+    """Write data to a BP file using a real, server-opened adios2.Stream.
+
+    python_code runs with `stream` already bound to an open
+    adios2.Stream(bp_path, "w") -- call stream.write(var_name, data, shape, start, count)
+    and stream.write_attribute(...) on it directly. Do NOT open your own Stream or
+    import adios2 yourself; the server already did both -- writing your own
+    `with adios2.Stream(...)` here would open the same file twice.
+
+    Requires ADIOS2 to be installed. Check the "engine" field in the response:
+    "adios2-fallback" means ADIOS2 isn't available here -- use submit_task with
+    plain numpy file I/O instead. "adios2-unused" means ADIOS2 was available but
+    your code never called stream.write(...) -- the file won't have real data in it.
+
+    Args:
+        name: Descriptive name for this task
+        bp_path: Output .bp path (supports /app/ paths)
+        python_code: Code that calls stream.write(...)/stream.write_attribute(...)
+        timeout: Max seconds to wait (default: 1800)
+    """
+    task_id = f"task_{uuid.uuid4().hex[:8]}"
+
+    if not _check_adios2():
+        return json.dumps({
+            "task_id": task_id, "status": "rejected", "engine": "adios2-fallback",
+            "error": "ADIOS2 is not available in this environment -- use submit_task "
+                     "with plain numpy file I/O instead.",
+        }, indent=2)
+
+    resolved_bp = _resolve_paths(bp_path)
+    resolved_code = _resolve_paths(python_code)
+    engine = _adios_engine_state(python_code, _STREAM_USAGE_MARKERS, require_intent=False)
+
+    wrapped_script = _wrap_as_bp_stream_task(resolved_code, resolved_bp, "w")
+    response = _run_and_finalize(task_id, name, wrapped_script, timeout, engine)
+    response["bp_path"] = resolved_bp
+    return json.dumps(response, indent=2)
+
+
+@mcp.tool()
+def read_bp(name: str, bp_path: str, python_code: str, timeout: int = 1800) -> str:
+    """Read data from a BP file using a real, server-opened adios2.Stream.
+
+    python_code runs with `stream` already bound to an open
+    adios2.Stream(bp_path, "r") -- iterate `for _ in stream.steps():` and call
+    stream.read(var_name)/stream.read_attribute(...) on it directly. Do NOT open
+    your own Stream or import adios2 yourself; the server already did both.
+
+    Requires ADIOS2 to be installed. Check the "engine" field in the response:
+    "adios2-fallback" means ADIOS2 isn't available here. "adios2-unused" means
+    your code never called stream.read(...) -- you read nothing from the file.
+
+    Args:
+        name: Descriptive name for this task
+        bp_path: Input .bp path to read (supports /app/ paths)
+        python_code: Code that calls stream.read(...)/stream.read_attribute(...)
+        timeout: Max seconds to wait (default: 1800)
+    """
+    task_id = f"task_{uuid.uuid4().hex[:8]}"
+
+    if not _check_adios2():
+        return json.dumps({
+            "task_id": task_id, "status": "rejected", "engine": "adios2-fallback",
+            "error": "ADIOS2 is not available in this environment -- use submit_task "
+                     "with plain numpy file I/O instead.",
+        }, indent=2)
+
+    resolved_bp = _resolve_paths(bp_path)
+    resolved_code = _resolve_paths(python_code)
+    engine = _adios_engine_state(python_code, _STREAM_USAGE_MARKERS, require_intent=False)
+
+    wrapped_script = _wrap_as_bp_stream_task(resolved_code, resolved_bp, "r")
+    response = _run_and_finalize(task_id, name, wrapped_script, timeout, engine)
+    response["bp_path"] = resolved_bp
+    return json.dumps(response, indent=2)
+
+
+@mcp.tool()
+def get_resources() -> str:
+    """Return available compute resources detected from the environment.
+
+    On a PBS cluster this reads PBS_NUM_NODES, PBS_NP, PBS_NUM_PPN, and
+    PBS_NODEFILE. On a local machine all counts fall back to 1. Always call
+    this before writing any MPI command so you know how many ranks are available.
+
+    Returns:
+        JSON with in_pbs, nnodes, ntasks, cpus_per_task, nodelist, launcher
+    """
+    return json.dumps(_detect_resources(), indent=2)
+
+
+@mcp.tool()
+def submit_mpi_task(
+    name: str,
+    command: str,
+    num_ranks: int = 0,
+    work_dir: str = "",
+    timeout: int = 1800,
+) -> str:
+    """Submit a command to run in parallel under MPI (mpirun/mpiexec).
+
+    Prepends the detected MPI launcher to the given command.
+
+    Args:
+        name:      Descriptive name for this task
+        command:   The executable and its arguments (without the launcher prefix)
+        num_ranks: Number of MPI ranks. 0 (default) uses all available ranks
+                   from PBS_NP, or 1 on a local machine.
+        work_dir:  Working directory (default: repo work/run0)
+        timeout:   Max seconds to wait (default: 1800)
+
+    Returns:
+        JSON with task_id, status, exit_code, stdout, stderr
+    """
+    task_id = f"task_{uuid.uuid4().hex[:8]}"
+    _work = _resolve_paths(work_dir) if work_dir else DEFAULT_WORK_DIR
+
+    resources = _detect_resources()
+    ranks = num_ranks if num_ranks > 0 else resources["ntasks"]
+    launcher = resources["launcher"]
+
+    if launcher == "mpirun":
+        full_cmd = f"mpirun -np {ranks} {command}"
+    elif launcher == "mpiexec":
+        full_cmd = f"mpiexec -n {ranks} {command}"
+    else:
+        full_cmd = command
+
+    _tasks[task_id] = {
+        "name": name,
+        "status": "running",
+        "depends_on": [],
+        "submitted_at": time.time(),
+        "mpi_ranks": ranks,
+        "launcher": launcher,
+    }
+
+    resolved_cmd = _resolve_paths(full_cmd)
+    result = _run_command(["bash", "-c", resolved_cmd], work_dir=_work, timeout=timeout)
+
+    _tasks[task_id]["status"] = "completed" if result["exit_code"] == 0 else "failed"
+    _tasks[task_id]["exit_code"] = result["exit_code"]
+    _tasks[task_id]["stdout"] = result["stdout"]
+    _tasks[task_id]["stderr"] = result["stderr"]
+    _tasks[task_id]["completed_at"] = time.time()
+
+    return json.dumps({
+        "task_id": task_id,
+        "name": name,
+        "status": _tasks[task_id]["status"],
+        "launcher": launcher,
+        "ranks": ranks,
+        "command": full_cmd,
+        "exit_code": result["exit_code"],
+        "stdout": result["stdout"][:3000],
+        "stderr": result["stderr"][:3000],
+    }, indent=2)
+
+
+@mcp.tool()
+def run_lammps(
+    script: str = "in.watbox",
+    work_dir: str = "",
+    timeout: int = 7200,
+) -> str:
+    """Run a LAMMPS simulation. Automatically selects the right execution method:
+    - Inside a PBS job with mpirun available: mpirun -np PBS_NP lmp -in <script>
+    - Otherwise (local / no MPI launcher): Python API (single process)
+
+    Args:
+        script: Input script filename relative to work_dir (default: in.watbox)
+        work_dir: Working directory containing the script and data files.
+                  Supports /app/ paths (default: repo work/run0)
+        timeout: Max seconds to wait (default: 7200)
+
+    Returns:
+        JSON with task_id, status, method (mpi|python_api), ranks, stdout, stderr
+    """
+    import glob as _glob
+    task_id = f"task_{uuid.uuid4().hex[:8]}"
+    _work = _resolve_paths(work_dir) if work_dir else DEFAULT_WORK_DIR
+
+    # Clear previous trajectory frames so stale output can't be mistaken for a new run.
+    frames_dir = os.path.join(_work, "frames")
+    if os.path.isdir(frames_dir):
+        for _old in _glob.glob(os.path.join(frames_dir, "*.lammpstrj")):
+            os.remove(_old)
+
+    res = _detect_resources()
+    use_mpi = res["in_pbs"] and bool(res["launcher"])
+    method = "mpi" if use_mpi else "python_api"
+    ranks = res["ntasks"] if use_mpi else 1
+
+    _tasks[task_id] = {
+        "name": f"run_lammps:{script}",
+        "status": "running",
+        "depends_on": [],
+        "submitted_at": time.time(),
+        "method": method,
+    }
+
+    if use_mpi:
+        # The pip-installed `lammps` wheel's bundled `lmp` binary cannot load on this
+        # cluster's kernel (ELF segment-layout mismatch — see parsl_server.py for the
+        # dmesg evidence) regardless of MPI runtime. Use the cluster-provided module
+        # (gcc 13.2.0 + OpenMPI 5.0.6) instead, which is built natively for this kernel.
+        cmd = (
+            f"module load lammps/22Jul2025 >/dev/null 2>&1 && "
+            f"cd {_work} && "
+            f"env -u PMI_SIZE -u PMI_RANK -u I_MPI_HYDRA_BOOTSTRAP "
+            f"mpirun -n {ranks} lmp -in {script}"
+        )
+        result = _run_command(["bash", "-lc", cmd], work_dir=_work, timeout=timeout)
+    else:
+        py_script = f"""\
+import os
+os.chdir("{_work}")
+from lammps import lammps
+lmp = lammps(cmdargs=["-screen", "none"])
+lmp.file("{script}")
+lmp.close()
+"""
+        result = _run_python_script(py_script, work_dir=_work, timeout=timeout)
+
+    exit_code = result["exit_code"]
+    frames_written = _glob.glob(os.path.join(frames_dir, "*.lammpstrj")) if os.path.isdir(frames_dir) else []
+    # exit 11 = SIGSEGV on lmp cleanup — output was already written before crash
+    if exit_code == 11 and frames_written:
+        status = "completed"
+        note = f"lmp exited 11 (SIGSEGV cleanup crash) but {len(frames_written)} trajectory frames were written — treating as success"
+    else:
+        status = "completed" if exit_code == 0 else "failed"
+        note = ""
+
+    _tasks[task_id]["status"] = status
+    _tasks[task_id]["exit_code"] = exit_code
+    _tasks[task_id]["stdout"] = result["stdout"]
+    _tasks[task_id]["stderr"] = result["stderr"]
+    _tasks[task_id]["completed_at"] = time.time()
+
+    return json.dumps({
+        "task_id":   task_id,
+        "name":      f"run_lammps:{script}",
+        "status":    status,
+        "method":    method,
+        "ranks":     ranks,
+        "exit_code": exit_code,
+        "frames":    len(frames_written),
+        "note":      note,
+        "stdout":    result["stdout"][:3000],
+        "stderr":    result["stderr"][:3000],
     }, indent=2)
 
 
@@ -464,7 +871,7 @@ def _indent(text: str, spaces: int) -> str:
 
 
 def _resolve_paths(text: str) -> str:
-    """Replace /app/ container paths with actual local repo paths."""
+    """Replace /app/ placeholder paths with actual local repo paths."""
     return text.replace("/app/", REPO_ROOT + "/").replace("//", "/")
 
 

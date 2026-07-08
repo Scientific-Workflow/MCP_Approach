@@ -1,8 +1,8 @@
 """
 MCP Explorer Agent -- ReAct loop that calls workflow engine tools via MCP protocol.
 
-The explorer receives tasks from the planner and an image_tag from the installer,
-then iteratively calls tools (exposed by the MCP server) to complete each task:
+The explorer receives tasks from the planner once the installer has finished
+preparing the local venv, then iteratively calls tools (exposed by the MCP server) to complete each task:
 submitting Python tasks, running shell commands, checking outputs, installing
 missing packages, and recovering from errors.
 
@@ -14,6 +14,7 @@ import os
 import sys
 import json
 import asyncio
+import time
 from typing import Optional
 from contextlib import AsyncExitStack
 
@@ -21,7 +22,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from rich.console import Console
-from trace_logger import tracer, extract_usage
+from trace_logger import tracer, extract_usage, message_to_dict
 from rich.panel import Panel
 
 from mcp import ClientSession, StdioServerParameters
@@ -73,6 +74,48 @@ def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
         return future.result(timeout=600)
     else:
         return asyncio.run(_call())
+
+
+# __ Skill file helpers ________________________________________________________
+
+_SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
+
+
+def _read_skill(rel_path: str, agent_name: str = "explorer", enabled: bool = True) -> str:
+    """Read skills/<rel_path>.SKILL.md -- returns '' if disabled (condition A) or not found.
+
+    Condition A never touches the filesystem under skills/ at all -- not even an
+    os.path.isfile check -- so disabled short-circuits before any I/O happens.
+    """
+    if not enabled:
+        tracer.log_skill_load(agent_name, rel_path, found=False, suppressed=True)
+        return ""
+    full = os.path.join(_SKILLS_ROOT, rel_path + ".SKILL.md")
+    found = os.path.isfile(full)
+    tracer.log_skill_load(agent_name, rel_path, found, suppressed=False)
+    if found:
+        with open(full) as f:
+            return f.read()
+    return ""
+
+
+# Set once per explorer run (see explorer()/_explorer_async) so the module-level
+# `load_skill` tool -- which the LLM calls with no access to AgentState -- can see
+# the current ablation condition.
+_current_condition: str = "B"
+
+# Mirrors agent_mcp.ENV_NOTES. Duplicated rather than imported to avoid a circular
+# import (agent_mcp imports `explorer` from this module).
+ENV_NOTES = {
+    "local": (
+        "Environment: a single local machine, no job scheduler. No PBS/LSF, no multi-node "
+        "MPI. /app/ paths are resolved to the repo root at runtime."
+    ),
+    "hpc": (
+        "Environment: an HPC cluster, presumably inside a job allocation. /app/ paths are "
+        "resolved to the repo root at runtime; never hardcode cluster-specific absolute paths."
+    ),
+}
 
 
 @tool
@@ -184,27 +227,203 @@ def read_file(path: str, max_lines: int = 100) -> str:
     return _call_mcp_tool("read_file", {"path": path, "max_lines": max_lines})
 
 
-# All tools available to the explorer
+@tool
+def get_resources() -> str:
+    """Detect available compute resources (nodes, ranks, launcher) for this run.
+
+    Always call this FIRST, before writing any MPI command and before deciding
+    whether you're on a single local machine or inside a multi-node HPC allocation.
+
+    Returns JSON with in_pbs, nnodes, ntasks, cpus_per_task, nodelist, launcher.
+    If in_pbs is false, call load_skill("local"). If in_pbs is true, call
+    load_skill("hpc") to learn the launcher conventions and storage paths.
+    """
+    return _call_mcp_tool("get_resources", {})
+
+
+@tool
+def submit_mpi_task(name: str, command: str, num_ranks: int = 0,
+                     work_dir: str = "/app/work/run0", timeout: int = 1800) -> str:
+    """Submit a command to run in parallel under MPI (mpirun/srun).
+
+    Only use this after get_resources confirms in_pbs=true. Prepends the detected
+    MPI launcher to the given command.
+
+    Args:
+        name: Descriptive name for this task
+        command: The executable and its arguments, without the launcher prefix
+                 (e.g. "lmp -in /app/work/run0/in.watbox")
+        num_ranks: Number of MPI ranks. 0 (default) uses all ranks from get_resources.
+        work_dir: Working directory (default: /app/work/run0)
+        timeout: Max seconds to wait (default: 1800)
+    """
+    return _call_mcp_tool("submit_mpi_task", {
+        "name": name, "command": command, "num_ranks": num_ranks,
+        "work_dir": work_dir, "timeout": timeout,
+    })
+
+
+@tool
+def run_lammps(script: str = "in.watbox", work_dir: str = "", timeout: int = 7200) -> str:
+    """Run a LAMMPS simulation. Automatically selects the right execution method:
+    - Inside a PBS job with mpirun available: mpirun -np PBS_NP lmp -in <script>
+    - Otherwise (local / no MPI launcher): Python API (single process)
+
+    Implemented identically by every engine's server (parsl/pycompss/adios) --
+    always call this directly for LAMMPS, never reimplement it with submit_task.
+
+    Args:
+        script: Input script filename relative to work_dir (default: in.watbox)
+        work_dir: Working directory containing the script and data files.
+                  Supports /app/ paths (default: repo work/run0)
+        timeout: Max seconds to wait (default: 7200)
+    """
+    return _call_mcp_tool("run_lammps", {
+        "script": script, "work_dir": work_dir, "timeout": timeout,
+    })
+
+
+@tool
+def write_bp(name: str, bp_path: str, python_code: str, timeout: int = 1800) -> str:
+    """Write data to a BP file using a real, server-opened adios2.Stream.
+
+    Only available when --engine adios. python_code runs with `stream` already
+    bound to an open adios2.Stream(bp_path, "w") -- call
+    stream.write(var_name, data, shape, start, count) and
+    stream.write_attribute(...) on it directly. Do NOT open your own Stream or
+    import adios2 yourself; the server already did both.
+
+    Args:
+        name: Descriptive name for this task
+        bp_path: Output .bp path (supports /app/ paths)
+        python_code: Code that calls stream.write(...)/stream.write_attribute(...)
+        timeout: Max seconds to wait (default: 1800)
+    """
+    return _call_mcp_tool("write_bp", {
+        "name": name, "bp_path": bp_path, "python_code": python_code, "timeout": timeout,
+    })
+
+
+@tool
+def read_bp(name: str, bp_path: str, python_code: str, timeout: int = 1800) -> str:
+    """Read data from a BP file using a real, server-opened adios2.Stream.
+
+    Only available when --engine adios. python_code runs with `stream` already
+    bound to an open adios2.Stream(bp_path, "r") -- iterate
+    `for _ in stream.steps():` and call stream.read(var_name)/
+    stream.read_attribute(...) on it directly. Do NOT open your own Stream or
+    import adios2 yourself; the server already did both.
+
+    Args:
+        name: Descriptive name for this task
+        bp_path: Input .bp path to read (supports /app/ paths)
+        python_code: Code that calls stream.read(...)/stream.read_attribute(...)
+        timeout: Max seconds to wait (default: 1800)
+    """
+    return _call_mcp_tool("read_bp", {
+        "name": name, "bp_path": bp_path, "python_code": python_code, "timeout": timeout,
+    })
+
+
+_KNOWLEDGE_SKILLS = {
+    "local": "knowledge/local",
+    "hpc":   "knowledge/lcrc",
+}
+
+# Engine-specific skills, force-loaded into the explorer's system prompt (see
+# _explorer_async) rather than left to load_skill -- (systems/<engine>, knowledge/<ENGINE>).
+_ENGINE_SKILLS = {
+    "parsl":    ("systems/parsl",    "knowledge/PARSL"),
+    "pycompss": ("systems/pycompss", "knowledge/PyCOMPSs"),
+    "adios":    ("systems/adios",    "knowledge/ADIOS"),
+}
+
+_ENGINE_RELEVANT_TOOLS = (
+    "submit_task", "submit_shell_task", "submit_mpi_task", "write_bp", "read_bp",
+    "run_lammps",
+)
+
+
+def _classify_engine_usage(engine: str, tool_name: str, tool_args: dict,
+                            tool_result_text: str) -> tuple[Optional[str], Optional[bool]]:
+    """Derive (engine_backend, engine_verified) for a tool call, for tracing.
+
+    engine_backend is the raw "engine" field self-reported by the MCP server (e.g.
+    "parsl-fallback", "adios2-unused"), when the tool's JSON result has one.
+
+    All three engines now use the same shape: the server itself is authoritative
+    on whether the engine was genuinely used, not just available --
+    parsl/pycompss_server.py track whether their runtime actually dispatched the
+    task (vs. fallback); adios_server.py's _adios_engine_state additionally scans
+    the submitted code for a real adios2 API call and reports "adios2-unused" when
+    the package was available but never actually called (see adios_server.py --
+    that content-scan used to live here, moved server-side so it's the single
+    source of truth instead of being duplicated client- and server-side).
+    "-fallback" maps to None for adios specifically (package unavailable isn't the
+    explorer's fault), but to False for parsl/pycompss (their fallback always
+    means a genuine runtime-dispatch failure worth flagging). "adios2-n/a" also
+    maps to None -- most submit_task calls in an ADIOS run (LAMMPS, OVITO,
+    rendering, ...) have nothing to do with ADIOS2 at all, so "didn't use it"
+    isn't a meaningful signal for those; only "imported it but never called it"
+    ("adios2-unused") is.
+    """
+    if tool_name not in _ENGINE_RELEVANT_TOOLS:
+        return None, None
+    try:
+        backend = json.loads(tool_result_text).get("engine")
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        backend = None
+    if backend is None:
+        return None, None
+    if engine in ("parsl", "pycompss"):
+        return backend, not backend.endswith("-fallback")
+    if engine == "adios":
+        if backend in ("adios2-fallback", "adios2-n/a"):
+            return backend, None
+        return backend, backend != "adios2-unused"
+    return backend, None
+
+
+@tool
+def load_skill(name: str) -> str:
+    """Load runtime-environment knowledge into your context: "local" or "hpc".
+
+    Call this only after get_resources tells you which environment you're actually
+    in -- do not load both. "local" covers single-machine constraints (no MPI,
+    no PBS). "hpc" covers PBS/mpirun conventions and LCRC storage paths.
+
+    Args:
+        name: "local" or "hpc"
+    """
+    if name not in _KNOWLEDGE_SKILLS:
+        return f"Unknown skill '{name}'. Use 'local' or 'hpc'."
+    # condition B/C: read the real curated skill file, unchanged.
+    # condition A: the skill file is suppressed (never touched) -- return the same
+    # lean ENV_NOTES substitute used by the orchestrator/planner in this condition.
+    enabled = _current_condition != "A"
+    content = _read_skill(_KNOWLEDGE_SKILLS[name], enabled=enabled)
+    return content or ENV_NOTES.get(name, ENV_NOTES["local"])
+
+
+# Tools available to the explorer regardless of engine
 EXPLORER_TOOLS = [
     submit_task, submit_shell_task,
     get_task_status, get_task_result, list_tasks,
     install_package, check_package,
     list_files, read_file,
+    get_resources, submit_mpi_task, run_lammps, load_skill,
 ]
 
+# Engine-specific additions -- adios_server.py is the only server that
+# implements write_bp/read_bp, so there's no reason to show these to the LLM
+# for parsl/pycompss runs.
+_ENGINE_EXTRA_TOOLS = {
+    "adios": [write_bp, read_bp],
+}
 
-# __ Skill file helpers ________________________________________________________
 
-_SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
-
-
-def _read_skill(rel_path: str) -> str:
-    """Read skills/<rel_path>.SKILL.md -- returns '' if not found."""
-    full = os.path.join(_SKILLS_ROOT, rel_path + ".SKILL.md")
-    if os.path.isfile(full):
-        with open(full) as f:
-            return f.read()
-    return ""
+def _tools_for_engine(engine: str) -> list:
+    return EXPLORER_TOOLS + _ENGINE_EXTRA_TOOLS.get(engine, [])
 
 
 # __ Explorer System Prompt ____________________________________________________
@@ -226,8 +445,11 @@ adapting your approach when things fail.
 
 | Tool | When to use |
 |---|---|
+| get_resources | **Call first.** Detects nodes/ranks/launcher (in_pbs true/false) |
+| load_skill | Load "local" or "hpc" environment knowledge -- pick ONE based on get_resources |
 | submit_task | Execute Python code (LAMMPS, OVITO, plotting, data processing) |
 | submit_shell_task | Run shell commands (cp, mkdir, ls, file operations) |
+| submit_mpi_task | Run an MPI-capable command (only if get_resources says in_pbs=true) |
 | get_task_status | Check if a previously submitted task is done |
 | get_task_result | Get full stdout/stderr from a completed task |
 | list_tasks | See all tasks and their statuses |
@@ -238,13 +460,17 @@ adapting your approach when things fail.
 
 ## Workflow
 
-1. Review the tasks list and plan your execution order
-2. Before running a task, check prerequisites (files exist, packages installed)
-3. Use submit_shell_task for file operations (copy, mkdir)
-4. Use submit_task for Python code (scientific computation, analysis, plotting)
-5. After each task, verify output (list_files, read_file)
-6. If a task fails, diagnose and fix (install package, change code, retry)
-7. Track task IDs -- use depends_on when tasks have dependencies
+1. Call get_resources first. Then call load_skill("hpc") if in_pbs is true, or
+   load_skill("local") if it is false -- load only the one that matches.
+2. Review the tasks list and plan your execution order
+3. Before running a task, check prerequisites (files exist, packages installed)
+4. Use submit_shell_task for file operations (copy, mkdir)
+5. Use submit_task for Python code (scientific computation, analysis, plotting)
+6. Use submit_mpi_task instead of submit_task/submit_shell_task for MPI-capable
+   executables, but only once get_resources has confirmed in_pbs=true
+7. After each task, verify output (list_files, read_file)
+8. If a task fails, diagnose and fix (install package, change code, retry)
+9. Track task IDs -- use depends_on when tasks have dependencies
 
 ## Rules
 
@@ -302,8 +528,9 @@ def explorer(state: dict) -> dict:
     Explorer node -- connects to MCP server and runs a ReAct tool-calling loop
     to execute workflow tasks step by step.
     """
-    global _mcp_session, _event_loop
+    global _mcp_session, _event_loop, _current_condition
 
+    _current_condition = state.get("condition", "B")
     console.print("\n[dim cyan][explorer] starting interactive workflow execution...[/dim cyan]")
     tracer.log_agent_start("explorer", {"engine": state.get("engine", "parsl")})
     tracer.log_agent_input("explorer", {
@@ -382,20 +609,22 @@ async def _explorer_async(state: dict, engine: str) -> dict:
             context_parts.append("Tasks to execute:\n" +
                                  "\n".join(f"  {i+1}. {t}" for i, t in enumerate(tasks)))
 
-        # Load skill files
-        _base_skill = _read_skill("agents/explorer")
+        # Load skill files -- condition A never touches skills/ at all, not even to list
+        # the use_cases/ directory, so the whole auto-detection block is skipped outright.
+        _enabled = state.get("condition", "B") != "A"
+        _base_skill = _read_skill("agents/explorer", enabled=_enabled)
         _uc_skill = ""
-        # Auto-detect use case: scan all use_cases/*/explorer.SKILL.md files,
-        # check if their description matches any package in stack_decision.
-        # This replaces the hardcoded 'if "lammps"' check.
-        _stack_lower = [p.lower() for p in stack_decision]
-        _uc_dir = os.path.join(_SKILLS_ROOT, "use_cases")
-        if os.path.isdir(_uc_dir):
-            for uc_name in os.listdir(_uc_dir):
-                uc_skill_path = os.path.join(_uc_dir, uc_name, "explorer.SKILL.md")
-                if os.path.isfile(uc_skill_path):
-                    with open(uc_skill_path) as f:
-                        content = f.read()
+        if _enabled:
+            # Auto-detect use case: scan all use_cases/*/explorer.SKILL.md files,
+            # check if their description matches any package in stack_decision.
+            # This replaces the hardcoded 'if "lammps"' check.
+            _stack_lower = [p.lower() for p in stack_decision]
+            _uc_dir = os.path.join(_SKILLS_ROOT, "use_cases")
+            if os.path.isdir(_uc_dir):
+                for uc_name in os.listdir(_uc_dir):
+                    content = _read_skill(f"use_cases/{uc_name}/explorer")
+                    if not content:
+                        continue
                     # Match if any stack package appears in the skill file description
                     desc_lower = content[:500].lower()
                     if any(pkg in desc_lower for pkg in _stack_lower):
@@ -403,9 +632,31 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                         console.print(f"[dim cyan][explorer] loaded use case skill: {uc_name}[/dim cyan]")
                         break
 
+        # Force-load engine-specific skills -- deterministic, not an LLM-discretionary
+        # tool call, since relying on the model to decide to load_skill("adios") is
+        # exactly how it ends up importing a package without ever using its real API.
+        # systems/<engine> (short, project-specific "what submit_task already does for
+        # you") is loaded before knowledge/<ENGINE> (the long general API reference) so
+        # the operational rules land first.
+        _sys_skill_path, _know_skill_path = _ENGINE_SKILLS.get(engine, (None, None))
+        _engine_skill = ""
+        if _sys_skill_path:
+            _engine_skill = "\n\n".join(filter(None, [
+                _read_skill(_sys_skill_path, enabled=_enabled),
+                _read_skill(_know_skill_path, enabled=_enabled),
+            ]))
+
         system_prompt = EXPLORER_SYSTEM_PROMPT
         if _base_skill:
             system_prompt = _base_skill + "\n\n---\n\n" + system_prompt
+        if _engine_skill:
+            system_prompt += (
+                f"\n\n--- {engine.upper()} Engine Reference (REQUIRED -- read before "
+                f"calling submit_task/submit_shell_task) ---\n\n"
+                f"This run's workflow engine is {engine}. Whether you actually exercise "
+                f"its real API is recorded in the trace, not just whether you import it.\n\n"
+                f"{_engine_skill}"
+            )
         if _uc_skill:
             system_prompt += "\n\n--- Use Case Context ---\n\n" + _uc_skill
 
@@ -427,7 +678,7 @@ async def _explorer_async(state: dict, engine: str) -> dict:
         llm = ChatOpenAI(
             model=os.getenv("CODER_MODEL_NAME", os.getenv("MODEL_NAME", "claudesonnet46")),
         )
-        llm_with_tools = llm.bind_tools(EXPLORER_TOOLS)
+        llm_with_tools = llm.bind_tools(_tools_for_engine(engine))
 
         messages = [
             SystemMessage(content=system_prompt),
@@ -456,7 +707,20 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                 console.print(f"[dim yellow][explorer] context trimmed to {len(messages)} messages[/dim yellow]")
 
             # Run LLM call in a thread (it's sync/blocking)
+            _t0 = time.time()
             response = await asyncio.to_thread(llm_with_tools.invoke, messages)
+            _latency_s = round(time.time() - _t0, 2)
+            _usage = extract_usage(response)
+            _model_name = getattr(llm, "model_name", None) or os.getenv(
+                "CODER_MODEL_NAME", os.getenv("MODEL_NAME", ""))
+            tracer.log_llm_call(
+                "explorer", _model_name,
+                [message_to_dict(m) for m in messages],
+                response.content if hasattr(response, "content") else str(response),
+                tool_calls=response.tool_calls or [],
+                input_tokens=_usage["input_tokens"], output_tokens=_usage["output_tokens"],
+                total_tokens=_usage["total_tokens"], latency_s=_latency_s, attempt=iteration + 1,
+            )
             messages.append(response)
 
             usage = extract_usage(response)
@@ -480,6 +744,34 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                 tool_id = tool_call["id"]
 
                 console.print(f"[dim cyan][explorer] calling tool: {tool_name}({json.dumps(tool_args, indent=2)[:200]})[/dim cyan]")
+
+                if tool_name == "run_lammps":
+                    console.print(Panel(
+                        f"script={tool_args.get('script', 'in.watbox')}  work_dir={tool_args.get('work_dir') or '(default)'}",
+                        title="[bold yellow]Running LAMMPS simulation[/bold yellow]",
+                        border_style="yellow",
+                    ))
+
+                # load_skill is client-side (reads local skill files via _read_skill) --
+                # no MCP server implements it as a tool, so it must run locally rather
+                # than being forwarded to session.call_tool like every other tool below.
+                if tool_name == "load_skill":
+                    tool_result = load_skill.invoke(tool_args)
+                    console.print(f"[green][explorer] {tool_name} -> loaded locally[/green]")
+                    exploration_log.append({
+                        "iteration": iteration + 1,
+                        "tool": tool_name,
+                        "args": tool_args,
+                        "result": tool_result[:2000],
+                        "succeeded": True,
+                    })
+                    tracer.log_tool_call("explorer", tool_name, tool_args, tool_result,
+                                         True, iteration=iteration + 1)
+                    messages.append(ToolMessage(
+                        content=tool_result[:_MAX_TOOL_RESULT_CHARS],
+                        tool_call_id=tool_id,
+                    ))
+                    continue
 
                 # Call MCP tool with timeout protection
                 try:
@@ -564,8 +856,17 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                         tool_succeeded = False
                         display_status = "unknown response"
                 except (json.JSONDecodeError, AttributeError):
-                    tool_succeeded = True  # raw text response, not an error
-                    display_status = "done"
+                    if tool_result.lower().startswith(("unknown tool", "error")):
+                        # Plain-text error responses (e.g. a hallucinated tool name) must
+                        # not be marked successful just because they aren't JSON.
+                        tool_succeeded = False
+                        display_status = tool_result[:80]
+                    else:
+                        tool_succeeded = True  # raw text response, not an error
+                        display_status = "done"
+
+                engine_backend, engine_verified = _classify_engine_usage(
+                    engine, tool_name, tool_args, tool_result)
 
                 log_entry = {
                     "iteration": iteration + 1,
@@ -573,15 +874,44 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                     "args": tool_args,
                     "result": tool_result[:2000],
                     "succeeded": tool_succeeded,
+                    "engine_backend": engine_backend,
+                    "engine_verified": engine_verified,
                 }
                 exploration_log.append(log_entry)
 
                 color = "green" if tool_succeeded else "red"
                 console.print(f"[{color}][explorer] {tool_name} -> {display_status}[/{color}]")
+                if tool_name != "run_lammps":
+                    try:
+                        _launch_cmd = json.loads(tool_result).get("launch_command")
+                        if _launch_cmd:
+                            console.print(f"[dim {color}][explorer]   $ {_launch_cmd}[/dim {color}]")
+                    except (json.JSONDecodeError, AttributeError):
+                        pass
+                if tool_name == "run_lammps":
+                    try:
+                        r = json.loads(tool_result)
+                        console.print(
+                            f"[bold {color}][explorer] LAMMPS {r.get('status', '?')}: "
+                            f"method={r.get('method', '?')} ranks={r.get('ranks', '?')} "
+                            f"frames={r.get('frames', '?')} launched_via={r.get('launched_via', '?')}"
+                            f"[/bold {color}]"
+                        )
+                        if r.get("launch_command"):
+                            console.print(f"[dim {color}][explorer]   $ {r['launch_command']}[/dim {color}]")
+                    except (json.JSONDecodeError, AttributeError):
+                        pass
+                if engine_verified is False:
+                    console.print(
+                        f"[bold red][explorer] WARNING: did not exercise the real "
+                        f"{engine} API in '{tool_args.get('name', tool_name)}' "
+                        f"(engine_backend={engine_backend})[/bold red]"
+                    )
 
-                # Log to trace
+                # Log to trace (full result, not truncated -- needed for debugging failed runs)
                 tracer.log_tool_call("explorer", tool_name, tool_args,
-                                     tool_result[:300], tool_succeeded)
+                                     tool_result, tool_succeeded, iteration=iteration + 1,
+                                     engine_backend=engine_backend, engine_verified=engine_verified)
 
                 messages.append(ToolMessage(
                     content=tool_result[:_MAX_TOOL_RESULT_CHARS],
@@ -620,6 +950,21 @@ async def _explorer_async(state: dict, engine: str) -> dict:
             f"{iteration + 1} iterations"
         )
         console.print(f"[dim cyan][explorer] {summary}[/dim cyan]")
+
+        # Record what was actually produced -- supports tier-1/tier-3 scoring
+        # directly from the trace without re-deriving it from tool-call text.
+        work_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "work")
+        artifacts = []
+        if os.path.isdir(work_dir):
+            for dirpath, _, filenames in os.walk(work_dir):
+                for fn in filenames:
+                    full = os.path.join(dirpath, fn)
+                    try:
+                        size_bytes = os.path.getsize(full)
+                    except OSError:
+                        size_bytes = -1
+                    artifacts.append({"path": full, "size_bytes": size_bytes})
+        tracer.log_artifact_manifest(artifacts)
 
         tracer.log_agent_output("explorer", {
             "total_tool_calls": total_calls,

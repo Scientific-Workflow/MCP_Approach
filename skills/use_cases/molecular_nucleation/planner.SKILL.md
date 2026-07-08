@@ -34,7 +34,7 @@ Load when planning a molecular nucleation or water crystallization workflow. Pro
 ### Software tools to identify
 - MD engine: LAMMPS (always present in this project)
 - Structure analysis: OVITO with IdentifyDiamondModifier
-- Workflow orchestration: Parsl
+- Workflow orchestration: whichever engine this run was started with (`--engine parsl`/`pycompss`/`adios`)
 - Any post-processing tools
 
 ---
@@ -46,10 +46,18 @@ The venv provides EXACTLY these pip-installable packages. Use only these:
 | Package | Version constraint |
 |---|---|
 | ovito | (latest installed) |
-| parsl | `parsl>=2024.0.0` |
 | numpy | (latest installed) |
 | matplotlib | (latest installed) |
 | Pillow | (required for GIF generation) |
+
+**Engine-specific package (depends on `--engine`):**
+- `--engine parsl`: add `parsl>=2024.0.0` -- normal pip package, hard requirement.
+- `--engine pycompss`: do NOT add `pycompss` -- it is never pip-installed by the
+  installer (see `systems/pycompss` skill); the server detects the hand-built
+  COMPSs runtime via `COMPSS_HOME` automatically.
+- `--engine adios`: you MAY add `adios2`, but it's optional -- the workflow has a
+  numpy-I/O fallback (see `systems/adios` skill), so don't block the run if it's
+  missing.
 
 **LAMMPS is NOT in stack_decision.** It is source-built and pre-installed — do NOT list it as a pip package.
 
@@ -61,7 +69,7 @@ Add `mpi4py` only if the environment knowledge confirms MPI is available.
 ## Task Templates — MCP Execution Style
 
 Tasks describe what the **explorer executes via MCP tool calls**, step by step.
-There is no workflow.py, no @python_app, no main(), no bash launcher.
+There is no workflow.py, no @python_app/@task wrapping, no main(), no bash launcher.
 Each task maps to one or a few `submit_task` or `submit_shell_task` calls.
 
 ---
@@ -72,7 +80,7 @@ Each task maps to one or a few `submit_task` or `submit_shell_task` calls.
 > "Run LAMMPS and analyze the output."
 
 ### Artifact approach (BAD — do not write tasks like this)
-> "Write a Parsl @python_app run_lammps that copies files and runs the simulation."
+> "Write a @python_app/@task run_lammps that copies files and runs the simulation."
 > "Write a main() function with argparse."
 > "Write a run_workflow.sh launcher."
 
@@ -132,13 +140,17 @@ Each task maps to one or a few `submit_task` or `submit_shell_task` calls.
 - **LAMMPS task MUST use `run_lammps`** — do NOT use `submit_task`, `submit_mpi_task`, or any other tool for running LAMMPS. `run_lammps` handles HPC vs local automatically.
 - **All paths in tasks MUST use `/app/`** — never use `/lcrc/project/`, `/gpfs/`, `/scratch/`, or any cluster-specific path. `/app/` is always resolved correctly by the server regardless of environment.
 - Do NOT add tasks for "install LAMMPS" or "set up the venv" — the environment is pre-built
-- Do NOT write tasks that say "write a @python_app", "write a main()", or "write a bash launcher"
+- Do NOT write tasks that say "write a @python_app/@task", "write a main()", or "write a bash launcher"
 - If the paper uses a parameter not in the current in.watbox, note it in literature_findings but do NOT hardcode it — in.watbox controls the simulation and must be used as-is
 - The input script (in.watbox) is user-controlled; the explorer must never modify it
 
 ---
 
 ## Example Output
+
+This example assumes `--engine parsl` was selected -- swap the engine-specific
+package per the Stack Decision rules above if a different engine was chosen
+(omit it for `pycompss`, use `adios2` optionally for `adios`).
 
 ```json
 {

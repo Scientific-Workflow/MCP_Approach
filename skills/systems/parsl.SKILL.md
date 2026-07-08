@@ -1,3 +1,4 @@
+
 ---
 name: systems/parsl
 description: >
@@ -9,6 +10,41 @@ description: >
 # Parsl — System Skill
 
 Parsl orchestrates workflow steps as asynchronous Python functions. In MAW, it manages the LAMMPS simulation and OVITO analysis as parallel tasks on a single local node.
+
+---
+
+## READ THIS FIRST: `submit_task` Already Runs Your Code Through Parsl
+
+In the MCP tool-calling architecture, `submit_task`'s `python_code` argument is
+**already executed as a Parsl `@python_app` by the server itself**, on a
+persistent worker pool the server set up at startup
+(`servers/parsl_server.py`: `_exec_command_app` is `@python_app`-decorated,
+and every `submit_task`/`submit_shell_task` call routes through it). This
+happens automatically, for every single task, with zero code from you.
+
+**Never write `import parsl`, `from parsl.config import Config`,
+`HighThroughputExecutor`, `LocalProvider`, or `parsl.load(...)` inside the
+`python_code` string you pass to `submit_task`.** Doing so creates a second,
+fully independent Parsl runtime *nested inside* a task that the server
+already dispatched through its own Parsl runtime. Confirmed in a real run:
+this nested config let Parsl auto-detect the node's full core count and spin
+up **128 separate worker processes** to run what was meant to be one simple
+function call -- multiple seconds of pure overhead, for nothing.
+
+**If you need several independent units of work done concurrently** (e.g.
+one render per output file), do **not** try to build that concurrency
+yourself with `@python_app` inside one `submit_task` call. Instead, just call
+`submit_task` **multiple times** -- once per unit of work -- as ordinary,
+separate tool calls with plain Python in each one. The server's own
+persistent worker pool already runs those concurrently; you get real
+parallelism for free without writing a single line of Parsl code.
+
+The API reference below (`Config`, `@python_app`, lifecycle) describes what
+the *server* does under the hood, for your understanding -- it is not a
+template to copy into `python_code`. The only context where you would
+legitimately write this yourself is generating a *standalone* Parsl script
+outside the MCP tool-calling flow (the "artifact" approach), which is a
+different code path from this one.
 
 ---
 
@@ -109,6 +145,7 @@ def my_step(arg1, arg2):
 | `strategy` not set to `"none"` | Can cause auto-scaling issues in local mode |
 | `parsl.load()` called twice without `parsl.clear()` | Raises NoDataFlowKernelError |
 | `WorkerLost` error | Worker process crashed — check stderr for the actual exception |
+| Simulation task submitted more than once per run | Call the sim `@python_app`/`submit_task` exactly once per workflow invocation — re-submitting (e.g. on replan or retry) silently produces duplicate runs instead of reusing the result |
 
 ---
 

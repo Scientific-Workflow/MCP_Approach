@@ -48,12 +48,6 @@ cp /app/data/data.init /app/work/run0/
 cp /app/data/in.watbox /app/work/run0/
 ```
 
-### Run LAMMPS
-Call the `run_lammps` tool directly — do NOT use `submit_task` or write Python code for this:
-```
-run_lammps(script="in.watbox", work_dir="/app/work/run0")
-```
-The server handles HPC vs local execution automatically. Never modify in.watbox.
 
 ### Expected output
 - `/app/work/run0/frames/step.*.lammpstrj` — trajectory files
@@ -238,6 +232,41 @@ print("Timeseries plot saved")
 
 ---
 
+## ADIOS2 Engine Notes (when `--engine adios`)
+
+LAMMPS trajectory output (Stage 1) stays native `.lammpstrj` -- **never add a
+`dump ... adios ...` line or otherwise try to make LAMMPS itself emit BP
+files.** Confirmed by checking `lmp -h`'s own "Installed packages" list on
+this cluster's LAMMPS module: ADIOS is not compiled in. Attempting it just
+fails with "Unrecognized dump style." `in.watbox` also stays untouched
+regardless, per the existing rule.
+
+The real inter-stage numerical data this applies to is Stage 2's per-frame
+diamond-structure counts (frame, timestep, cubic_diamond_count,
+hexagonal_diamond_count) -- the only numbers that flow from one stage to
+another in this workflow:
+
+- **Stage 2 (OVITO analysis)**: write the per-frame counts with `write_bp`
+  instead of (or in addition to) `results.csv` -- one `stream.write(...)`
+  call per column per frame inside the same loop that currently builds the
+  CSV rows. This is the producer side of the real transport, not a
+  conversion step bolted on after the fact.
+- **Stage 3c (nucleation timeseries plot)**: read those counts back with
+  `read_bp` -- `for _ in stream.steps(): cubic = stream.read("cubic_diamond_count")`
+  etc. -- instead of opening `results.csv` directly.
+- **Stage 3a (per-frame rendering) and 3b (GIF assembly) do NOT need
+  ADIOS2.** Stage 3a re-reads the raw trajectory frames directly via OVITO
+  for per-atom coloring (not Stage 2's aggregate counts), and 3b just
+  combines already-rendered PNGs. Both are final human-facing visual
+  artifacts -- same as cosmology's final density-slice PNG, plain files
+  regardless of engine mode.
+
+See `systems/adios` skill for the general `write_bp`/`read_bp` API and the
+three-state `engine` field (`adios2` / `adios2-unused` / `adios2-fallback`)
+that the trace checks this against.
+
+---
+
 ## Common Pitfalls
 
 | Pitfall | Solution |
@@ -255,3 +284,11 @@ print("Timeseries plot saved")
 - `/app/data/in.watbox` -- LAMMPS input script. Parameters: `run 9000`, `timestep 0.01`, `variable T equal 180`, `variable P equal 1.0`. DO NOT modify.
 - `/app/data/data.init` -- initial atom positions
 - `/app/data/AW.tersoff` -- Tersoff force field for water
+
+
+### Run LAMMPS
+Call the `run_lammps` tool directly — do NOT use `submit_task` or write Python code for this:
+```
+run_lammps(script="in.watbox", work_dir="/app/work/run0")
+```
+The server handles HPC vs local execution automatically. Never modify in.watbox.

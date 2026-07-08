@@ -100,9 +100,16 @@ A complete task list must cover ALL of these phases:
 
 ## Skill Requests
 
-On your **first call**, request the skill file for the specific workflow type and the systems being used.
+On your **first call**, request the skill file for the specific workflow type and
+`systems/<engine>`, where `<engine>` is the actual engine this run was started
+with (`parsl`/`pycompss`/`adios`) — not whichever engine happens to appear in an
+example below. Always match the real `--engine` value for this run.
 
-Example: `"skill_requests": ["use_cases/molecular_nucleation/planner", "systems/parsl"]`
+Example, for a run started with `--engine parsl`:
+`"skill_requests": ["use_cases/molecular_nucleation/planner", "systems/parsl"]`
+
+If this run's engine were `adios` instead, the second entry would be
+`"systems/adios"`, not `"systems/parsl"`.
 
 ---
 
