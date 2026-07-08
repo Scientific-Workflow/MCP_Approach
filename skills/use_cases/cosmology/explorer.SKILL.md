@@ -137,8 +137,10 @@ submit_shell_task(
 ```
 
 - Capture the returned job ID, then poll with `qstat <job_id>` via `submit_shell_task`
-  until the state is `C` (completed). Do not busy-loop with zero delay — space polls
-  out.
+  until the state is `C` (completed). Use a **fixed 60-second interval** between polls
+  (e.g. `sleep 60 && qstat <job_id>`) — do not busy-loop with zero delay, and do not
+  escalate the interval between polls; `submit_shell_task` blocks for the full sleep
+  duration, so growing it wastes wall-clock time for no benefit.
 
 ---
 
@@ -252,16 +254,33 @@ this is a final human-facing artifact, plain `.png` is correct (no ADIOS2 needed
 
 ## ADIOS2 Engine Notes (when `--engine adios`)
 
-`write_bp`/`read_bp` only work through the live MCP session — they open a real
-`adios2.Stream` on the server side in response to a tool call. The `analyze_and_render.py`
-script embedded in the PBS job runs standalone, invoked directly by the batch job
-with no MCP tools involved, so it **cannot** call `write_bp`/`read_bp` — write the
-embedded script's intermediate arrays (x,y,z,vx,vy,vz,phi,mass; halo catalog;
-density-slice grid) as plain `.npz`/numpy I/O instead, regardless of engine. This is
-a real limitation of combining producer and visualization into one non-interactive
-job: real ADIOS2 `Stream` usage requires the live MCP session, which the embedded
-script doesn't have. `dm_density_slice.png` and `summary.txt` were always plain
-human-facing files regardless of engine mode, so that part is unaffected.
+The `write_bp`/`read_bp` MCP *tools* can't be called from inside the embedded
+`analyze_and_render.py` script — it runs standalone inside the PBS job, invoked
+directly by the batch script with no MCP session available, and those are MCP
+tools like any other, so they need a live session to invoke. But that's a
+constraint on the *tools*, not on ADIOS2 itself: `adios2` is a plain Python
+library (already installed in the venv this script runs under) with no
+dependency on any session, server process, or IPC — it just reads/writes `.bp`
+files on disk. `write_bp`/`read_bp` work by generating a small wrapper script
+(`import adios2; with adios2.Stream(path, mode) as stream: ...`) and running it
+as a subprocess — exactly the same execution mechanism the embedded script
+already uses. There's nothing stopping the embedded script from doing the same
+thing directly.
+
+So: when `--engine adios` is selected, **this is required, not an optional
+enhancement.** `import adios2` in `analyze_and_render.py` itself and use
+`adios2.Stream(path, mode)` directly (not the `write_bp`/`read_bp` tools, which
+aren't reachable from here) with a genuine `stream.write(...)` then
+`stream.read(...)` round trip — write the array to the `.bp` file and then
+actually read it back from that file before using it, don't just write it and
+keep using the in-memory copy. This applies to the real inter-stage numerical
+data: `particles_step<N>.bp` (the raw snapshot arrays: x,y,z,vx,vy,vz,phi,mass)
+and `density_slice.bp` (the projected density grid), matching the `.bp` variants
+already listed under Output Files below. `halo_catalog` and `most_massive_halo`
+stay `.csv`/`.txt` — they're small, one-shot metadata reads from HACC's own
+halo-finder output, not numerical arrays flowing between processing stages.
+`dm_density_slice.png` and `summary.txt` stay plain human-facing files regardless
+of engine mode.
 
 ---
 

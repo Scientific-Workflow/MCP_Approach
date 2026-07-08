@@ -340,6 +340,7 @@ _ENGINE_SKILLS = {
 
 _ENGINE_RELEVANT_TOOLS = (
     "submit_task", "submit_shell_task", "submit_mpi_task", "write_bp", "read_bp",
+    "run_lammps",
 )
 
 
@@ -744,6 +745,13 @@ async def _explorer_async(state: dict, engine: str) -> dict:
 
                 console.print(f"[dim cyan][explorer] calling tool: {tool_name}({json.dumps(tool_args, indent=2)[:200]})[/dim cyan]")
 
+                if tool_name == "run_lammps":
+                    console.print(Panel(
+                        f"script={tool_args.get('script', 'in.watbox')}  work_dir={tool_args.get('work_dir') or '(default)'}",
+                        title="[bold yellow]Running LAMMPS simulation[/bold yellow]",
+                        border_style="yellow",
+                    ))
+
                 # load_skill is client-side (reads local skill files via _read_skill) --
                 # no MCP server implements it as a tool, so it must run locally rather
                 # than being forwarded to session.call_tool like every other tool below.
@@ -873,6 +881,26 @@ async def _explorer_async(state: dict, engine: str) -> dict:
 
                 color = "green" if tool_succeeded else "red"
                 console.print(f"[{color}][explorer] {tool_name} -> {display_status}[/{color}]")
+                if tool_name != "run_lammps":
+                    try:
+                        _launch_cmd = json.loads(tool_result).get("launch_command")
+                        if _launch_cmd:
+                            console.print(f"[dim {color}][explorer]   $ {_launch_cmd}[/dim {color}]")
+                    except (json.JSONDecodeError, AttributeError):
+                        pass
+                if tool_name == "run_lammps":
+                    try:
+                        r = json.loads(tool_result)
+                        console.print(
+                            f"[bold {color}][explorer] LAMMPS {r.get('status', '?')}: "
+                            f"method={r.get('method', '?')} ranks={r.get('ranks', '?')} "
+                            f"frames={r.get('frames', '?')} launched_via={r.get('launched_via', '?')}"
+                            f"[/bold {color}]"
+                        )
+                        if r.get("launch_command"):
+                            console.print(f"[dim {color}][explorer]   $ {r['launch_command']}[/dim {color}]")
+                    except (json.JSONDecodeError, AttributeError):
+                        pass
                 if engine_verified is False:
                     console.print(
                         f"[bold red][explorer] WARNING: did not exercise the real "

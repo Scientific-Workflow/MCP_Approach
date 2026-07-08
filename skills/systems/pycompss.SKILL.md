@@ -18,18 +18,21 @@ optimization, and heterogeneous resource management.
 ## READ THIS FIRST: `submit_task` Already Wraps Your Code
 
 In the MCP tool-calling architecture, `submit_task`'s `python_code` is
-**already wrapped with `@task`/`compss_start()`/`compss_wait_on()`/
-`compss_stop()` by the server itself** before it runs
-(`servers/pycompss_server.py`: `_wrap_as_compss_task()` injects this
-automatically around every submitted script). This happens for every task,
-with zero code from you.
+**already wrapped with `@task`/`compss_wait_on()` by the server itself**
+before it runs (`servers/pycompss_server.py`: `_wrap_as_compss_task()`
+injects this automatically around every submitted script). This happens for
+every task, with zero code from you. Inside a PBS job, the wrapped script is
+launched through the real `runcompss` binary, which owns the
+`compss_start()`/`compss_stop()` lifecycle itself; outside a PBS job it runs
+via a "direct link" mode where the wrapped script manages that lifecycle
+instead (see MCP Server Behavior below) -- either way, it's the server's job,
+not yours.
 
 **Never write `compss_start()`, `@task`, `compss_wait_on()`, or
 `compss_stop()` inside the `python_code` string you pass to `submit_task`.**
-That would double-initialize a runtime that's already managing the script's
-own lifecycle -- the server's own comment on this is explicit: launching an
-already-self-wrapped script through another layer of COMPSs orchestration
-"double-initializes the runtime."
+Depending on mode that either double-initializes a runtime `runcompss`/the
+server already manages, or duplicates lifecycle calls the wrapper already
+injects.
 
 **For several independent units of work** (e.g. one render per output
 file), don't try to build that concurrency yourself with `@task` inside one
@@ -83,21 +86,45 @@ compss_stop()
 
 ## MCP Server Behavior
 
-The PyCOMPSs MCP server (`servers/pycompss_server.py`) operates in two modes:
+The PyCOMPSs MCP server (`servers/pycompss_server.py`) operates in three modes:
 
-1. **COMPSs mode** (runtime available): Tasks are wrapped with `@task` decorator
-   and synchronized with `compss_wait_on()`, then run via plain `VENV_PYTHON`
-   (never `runcompss` -- the wrapped script self-manages `compss_start()`/
-   `compss_stop()` in "direct" link mode; launching that through `runcompss`
-   too would double-initialize the runtime).
+1. **`runcompss` mode** (runtime available AND running inside a PBS job): Tasks
+   are wrapped with `@task`/`compss_wait_on()` (no `compss_start()`/`compss_stop()`
+   in the script) and launched through the real `runcompss` binary against a
+   `project.xml`/`resources.xml` pair generated for this node's own hostname
+   (`_compss_config_files()`). `runcompss`'s own launcher owns the runtime
+   lifecycle. This targets the node's real hostname rather than "localhost"
+   because `runcompss`'s default local config launches its worker over SSH, and
+   this cluster enforces SSH-key+Duo MFA on login nodes -- SSH between nodes
+   *inside* an active PBS allocation isn't subject to that policy, confirmed by
+   hand. Also confirmed by hand: the wrapped script must NOT itself call
+   `compss_start()`/`compss_stop()` in this mode (that duplicates what
+   `runcompss` already does) and must NOT wrap the `@task` call in
+   `try/except` (PyCOMPSs's binding runs the script's top level once for task
+   registration before the runtime link is up, then again for real; wrapping
+   in `try/except` leaks that first pass's internal, expected
+   `'NoneType' object has no attribute 'process_task'` into task output
+   instead of the binding absorbing it silently).
 
-2. **Fallback mode** (runtime NOT available): Tasks execute as plain Python scripts.
+2. **Direct-link mode** (runtime available, NOT in a PBS job): Tasks are
+   wrapped with `@task` and synchronized with `compss_wait_on()`, then run via
+   plain `VENV_PYTHON` -- the wrapped script self-manages `compss_start()`/
+   `compss_stop()` itself, since there's no `runcompss` launcher owning that
+   lifecycle here. Used because `runcompss`'s SSH-based worker launch would hit
+   the same login-node Duo wall outside a job allocation.
+
+3. **Fallback mode** (runtime NOT available): Tasks execute as plain Python scripts.
    Same result, just no COMPSs orchestration. This allows development and testing
    on machines without COMPSs installed.
 
-The `engine` field in task results indicates which mode was used:
-- `"engine": "pycompss"` -- COMPSs runtime was used
-- `"engine": "pycompss-fallback"` -- direct Python execution
+The `engine` field in task results indicates which runtime was used:
+- `"engine": "pycompss"` -- COMPSs runtime was used (either mode 1 or 2)
+- `"engine": "pycompss-fallback"` -- direct Python execution (mode 3)
+
+The `launched_via` field distinguishes mode 1 from mode 2:
+- `"launched_via": "runcompss"` -- real `runcompss` binary launch
+- `"launched_via": "direct"` -- direct-link, self-managed lifecycle
+- `"launched_via": "fallback"` -- no COMPSs runtime at all
 
 ---
 
@@ -160,6 +187,22 @@ Python bindings at `~/.local/COMPSs/Bindings/python/3/pycompss` (always major ve
 `PYTHONPATH`/`LD_LIBRARY_PATH`/`COMPSS_HOME`, not `pip`. `pycompss_server.py` builds
 these from `COMPSS_HOME` (defaults to `~/.local/COMPSs`, override via env var if
 installed elsewhere) so this is reproducible without re-deriving any of the above.
+
+---
+
+## `runcompss` Requires COMPSs Env Vars in `~/.bashrc`, Not Just the Server's Subprocess Env
+
+`pycompss_server.py` sets `COMPSS_HOME`/`JAVA_HOME`/`LD_LIBRARY_PATH`/`PYTHONPATH`/`PATH`
+for its own subprocess (`TASK_ENV`), which covers the master-side `runcompss`
+process. But `runcompss`'s worker launch opens a **separate SSH session** to
+the target node, and SSH does not forward the master's shell env vars to that
+session -- the worker instead gets whatever a fresh login shell sets up via
+`~/.bashrc`. So `JAVA_HOME` (and `PATH` including `$JAVA_HOME/bin`) must also
+be exported in `~/.bashrc` itself, or the SSH-launched worker JVM fails with
+`Can't find JVM libraries in JAVA_HOME` or `setsid: failed to execute java: No
+such file or directory` and the master hangs retrying forever. `~/.bashrc` on
+this account now has this covered; if COMPSs is reinstalled elsewhere or on a
+new account, replicate those exports there too, not just in `TASK_ENV`.
 
 ---
 

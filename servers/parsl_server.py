@@ -35,7 +35,8 @@ from mcp.server.fastmcp import FastMCP
 # back to direct subprocess execution -- identical results, no Parsl scheduling.
 try:
     import parsl
-    from parsl import python_app
+    from parsl import python_app, bash_app
+    from parsl.app.errors import AppTimeout, BashExitFailure
     _PARSL_AVAILABLE = True
 except Exception:
     _PARSL_AVAILABLE = False
@@ -162,6 +163,9 @@ def _build_parsl_config():
     return Config(
         executors=[HighThroughputExecutor(**executor_kwargs)],
         run_dir=os.path.join(DEFAULT_WORK_DIR, ".parsl"),  # keep Parsl logs out of repo root
+        # Default (True) writes DEBUG-level parsl.log -- per-5s scaling-strategy
+        # chatter etc. False disables Parsl's automatic file logging entirely.
+        initialize_logging=False,
     )
 
 
@@ -209,6 +213,29 @@ if _PARSL_AVAILABLE:
             return {"exit_code": -1, "stdout": "", "stderr": f"Command timed out after {timeout}s"}
         except Exception as e:
             return {"exit_code": -1, "stdout": "", "stderr": str(e)}
+
+    @bash_app
+    def _bash_app_run(cmd_str, work_dir, stdout=None, stderr=None, walltime=None):
+        """Real Parsl bash app: used only for shell/MPI commands (submit_shell_task,
+        submit_mpi_task, run_lammps's MPI branch) -- submit_task's Python code still
+        goes through _exec_command_app above.
+
+        A @bash_app function returns the command line to run; Parsl's own BashApp
+        executor (parsl/app/bash.py's remote_side_bash_executor) is what actually
+        calls subprocess.Popen on it -- this is the engine's own code invoking the
+        command, not ours. That executor always runs via a non-login `bash -c`
+        (shell=True, executable="/bin/bash", no -l), so an inner `bash -lc` is
+        nested here explicitly to preserve the login-shell semantics (module
+        command, profile scripts) these tools already depend on -- e.g. run_lammps's
+        `module load lammps/...` needs -l to resolve the `module` function.
+        stdout/stderr are consumed by Parsl itself from these same kwargs (written
+        to the given files) after calling this function to get the command line.
+        """
+        import os
+        import shlex
+        os.makedirs(work_dir, exist_ok=True)
+        inner = f"cd {shlex.quote(work_dir)} && {cmd_str}"
+        return f"bash -lc {shlex.quote(inner)}"
 
 
 # __ Resource Detection ________________________________________________________
@@ -335,6 +362,75 @@ def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int 
             # Parsl execution failed -- fall back so the workflow still completes.
             print(f"[parsl_server] Parsl exec failed ({e}); using direct subprocess",
                   file=sys.stderr)
+    result = _run_command_local(cmd, work_dir, timeout)
+    result["used_parsl"] = False
+    return result
+
+
+def _run_bash_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int = 1800) -> dict:
+    """Execute a shell/MPI command via Parsl's native @bash_app when Parsl is
+    available; otherwise falls back to direct subprocess (_run_command_local).
+
+    Distinct from _run_command (which backs submit_task's Python-code execution
+    via the generic @python_app _exec_command_app): this is used only by
+    submit_shell_task, submit_mpi_task, and run_lammps's MPI branch, so that
+    Parsl's own BashApp construct -- not our own subprocess call -- is what
+    actually invokes the command.
+
+    cmd is the same ["bash", "-c"/"-lc", <shell string>] shape every caller
+    already builds; only the last element (the actual command string) is used
+    here since _bash_app_run always nests its own `bash -lc` regardless (see
+    its docstring for why).
+    """
+    cmd_str = cmd[-1]
+
+    if _ensure_parsl():
+        scripts_dir = os.path.join(work_dir, "_task_scripts")
+        os.makedirs(scripts_dir, exist_ok=True)
+        fd_out, stdout_path = tempfile.mkstemp(suffix=".out", prefix="bash_", dir=scripts_dir)
+        os.close(fd_out)
+        fd_err, stderr_path = tempfile.mkstemp(suffix=".err", prefix="bash_", dir=scripts_dir)
+        os.close(fd_err)
+
+        _stderr_banner_end = "--> end executable <--\n"
+
+        def _read_captured() -> tuple[str, str]:
+            try:
+                with open(stdout_path) as f:
+                    out = f.read().strip()
+            except Exception:
+                out = ""
+            try:
+                with open(stderr_path) as f:
+                    err = f.read()
+                # Parsl's own remote_side_bash_executor prints a
+                # "--> executable follows <-- ... --> end executable <--" banner
+                # to stderr before the command runs (see parsl/app/bash.py) --
+                # strip it so callers see the command's own stderr only, matching
+                # the plain-subprocess path's behavior.
+                if _stderr_banner_end in err:
+                    err = err.split(_stderr_banner_end, 1)[1]
+                err = err.strip()
+            except Exception:
+                err = ""
+            return out, err
+
+        try:
+            _bash_app_run(cmd_str, work_dir, stdout=stdout_path, stderr=stderr_path,
+                           walltime=timeout).result()
+            out, err = _read_captured()
+            return {"exit_code": 0, "stdout": out, "stderr": err, "used_parsl": True}
+        except BashExitFailure as e:
+            out, err = _read_captured()
+            return {"exit_code": e.exitcode, "stdout": out, "stderr": err, "used_parsl": True}
+        except AppTimeout:
+            return {"exit_code": -1, "stdout": "", "stderr": f"Command timed out after {timeout}s",
+                    "used_parsl": True}
+        except Exception as e:
+            # Parsl execution failed -- fall back so the workflow still completes.
+            print(f"[parsl_server] Parsl bash_app exec failed ({e}); using direct subprocess",
+                  file=sys.stderr)
+
     result = _run_command_local(cmd, work_dir, timeout)
     result["used_parsl"] = False
     return result
@@ -513,7 +609,7 @@ def submit_shell_task(
 
     # Replace /app/ paths with actual repo paths for local execution
     resolved_cmd = _resolve_paths(command)
-    result = _run_command(["bash", "-c", resolved_cmd], work_dir=_work, timeout=timeout)
+    result = _run_bash_command(["bash", "-c", resolved_cmd], work_dir=_work, timeout=timeout)
 
     _tasks[task_id]["status"] = "completed" if result["exit_code"] == 0 else "failed"
     _tasks[task_id]["exit_code"] = result["exit_code"]
@@ -769,7 +865,7 @@ def submit_mpi_task(
     }
 
     resolved_cmd = _resolve_paths(full_cmd)
-    result = _run_command(["bash", "-c", resolved_cmd], work_dir=_work, timeout=timeout)
+    result = _run_bash_command(["bash", "-c", resolved_cmd], work_dir=_work, timeout=timeout)
 
     _tasks[task_id]["status"] = "completed" if result["exit_code"] == 0 else "failed"
     _tasks[task_id]["exit_code"] = result["exit_code"]
@@ -848,7 +944,7 @@ def run_lammps(
             f"env -u PMI_SIZE -u PMI_RANK -u I_MPI_HYDRA_BOOTSTRAP "
             f"mpirun -n {ranks} lmp -in {script}"
         )
-        result = _run_command(["bash", "-lc", cmd], work_dir=_work, timeout=timeout)
+        result = _run_bash_command(["bash", "-lc", cmd], work_dir=_work, timeout=timeout)
     else:
         py_script = f"""\
 import os, sys

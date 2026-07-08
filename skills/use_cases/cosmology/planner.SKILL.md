@@ -60,10 +60,13 @@ matplotlib
 mpi4py        (only if environment knowledge confirms MPI is available)
 ```
 
-If `--engine adios` is selected, you MAY add `adios2` — but it's not mandatory: the
-workflow has a documented numpy-I/O fallback (see `systems/adios` skill), so omitting
-it is acceptable if you're unsure it's installable. Never add it as a hard requirement
-that blocks the run.
+If `--engine adios` is selected, add `adios2` — for this engine it's a real
+requirement, not an optional extra: task 3 below requires the analysis script to
+use `adios2.Stream` (write and read back) for its intermediate arrays. If
+`adios2` genuinely fails to install, fall back to the documented numpy-I/O path
+(see `systems/adios` skill) rather than blocking the run — but don't omit it
+from `stack_decision` by default just because it's not strictly required to
+avoid a hard failure.
 
 **Do NOT add:** `ovito`, `Pillow`, `lammps`, `scipy`, `ase`, `h5py`, `pygio` — none of
 these are needed, and `pygio`/HACC binaries are not pip-installable in the first place
@@ -132,6 +135,15 @@ back to old data from another run.
    snapshot/halo catalog content — those paths won't have this run's real data
    until the producer below has executed."
 
+3a. "IF `--engine adios` WAS SELECTED (this is its own required task, not optional):
+   analyze_and_render.py MUST `import adios2` and use `adios2.Stream` — not `.npz`
+   — for `particles_step<N>.bp` (write x,y,z,vx,vy,vz,phi,mass with `stream.write`,
+   then re-open the file and read them back with `stream.read` before using them)
+   and `density_slice.bp` (write the computed grid with `stream.write`, then read
+   it back with `stream.read` before passing it to matplotlib). Do this before
+   moving on to the PBS script below — do not defer it or treat it as an
+   enhancement to add if time allows."
+
 4. "Build a PBS batch script yourself (do not submit subme.pbs unmodified) — use
    subme.pbs only as a reference for the executable/env/param paths. Use
    WALLTIME=<walltime, default 01:00:00> and NRANKS=<ranks, default 8>. The script
@@ -144,7 +156,18 @@ back to old data from another run.
    this use case). Capture and report the returned job ID. Do not modify subme.pbs."
 
 5. "Poll the job with `qstat <job_id>` via submit_shell_task until it reaches a
-   completed state. Space polls out rather than busy-looping."
+   completed state. Use a fixed 60-second interval between polls (e.g. `sleep 60 &&
+   qstat <job_id>`) — do not busy-loop, and do not grow the interval between polls;
+   submit_shell_task blocks for the full sleep, so a longer interval just wastes
+   wall-clock time."
+
+5a. "IF `--engine adios` WAS SELECTED: use `list_files` on /app/work/run0/ to confirm
+   `particles_step<N>.bp` and `density_slice.bp` exist. If either is missing,
+   analyze_and_render.py did not actually use `adios2.Stream` as required by task
+   3a — go back and fix it (add the real `stream.write`/`stream.read` calls), then
+   re-run the analysis stage directly via submit_shell_task against this run's
+   already-produced output. Do not report the run as complete with `.npz` in
+   place of the required `.bp` files."
 
 6. "Read back dm_density_slice.png and summary.txt from /app/work/run0/ (written by
    the embedded script when the job ran) to confirm they exist and report them. If

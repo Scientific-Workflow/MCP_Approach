@@ -145,6 +145,7 @@ def my_step(arg1, arg2):
 | `strategy` not set to `"none"` | Can cause auto-scaling issues in local mode |
 | `parsl.load()` called twice without `parsl.clear()` | Raises NoDataFlowKernelError |
 | `WorkerLost` error | Worker process crashed — check stderr for the actual exception |
+| Simulation task submitted more than once per run | Call the sim `@python_app`/`submit_task` exactly once per workflow invocation — re-submitting (e.g. on replan or retry) silently produces duplicate runs instead of reusing the result |
 
 ---
 
