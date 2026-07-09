@@ -1,5 +1,3 @@
-ovito
 numpy
 matplotlib
-Pillow
-adios2
+mpi4py

@@ -81,11 +81,14 @@ config = Config(
         )
     ],
     strategy="none",
+    initialize_logging=False,
 )
 parsl.load(config)
 ```
 
 **CRITICAL:** Do NOT add `max_workers`, `max_workers_per_node`, or any kwargs not shown. They cause `TypeError` in recent Parsl versions.
+
+`initialize_logging=False` disables Parsl's automatic `parsl.log` file logging. The default (`True`) writes DEBUG-level output -- including per-5s scaling-strategy chatter -- that isn't useful here and just clutters the run directory.
 
 ## Config — HPC (inside existing PBS job)
 
@@ -112,6 +115,7 @@ config = Config(
         )
     ],
     strategy="none",
+    initialize_logging=False,
 )
 parsl.load(config)
 ```
