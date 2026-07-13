@@ -615,22 +615,41 @@ async def _explorer_async(state: dict, engine: str) -> dict:
         _base_skill = _read_skill("agents/explorer", enabled=_enabled)
         _uc_skill = ""
         if _enabled:
-            # Auto-detect use case: scan all use_cases/*/explorer.SKILL.md files,
-            # check if their description matches any package in stack_decision.
-            # This replaces the hardcoded 'if "lammps"' check.
-            _stack_lower = [p.lower() for p in stack_decision]
             _uc_dir = os.path.join(_SKILLS_ROOT, "use_cases")
-            if os.path.isdir(_uc_dir):
+            _domain_lower = (state.get("domain") or "").strip().lower()
+
+            # Preferred: deterministic lookup from --domain, set explicitly by the
+            # caller -- not inferred. Bidirectional substring match (not equality)
+            # because domain labels aren't guaranteed to match folder names exactly
+            # (e.g. --domain MOLECULAR vs the use_cases/molecular_nucleation/ folder).
+            if _domain_lower and os.path.isdir(_uc_dir):
                 for uc_name in os.listdir(_uc_dir):
-                    content = _read_skill(f"use_cases/{uc_name}/explorer")
-                    if not content:
-                        continue
-                    # Match if any stack package appears in the skill file description
-                    desc_lower = content[:500].lower()
-                    if any(pkg in desc_lower for pkg in _stack_lower):
-                        _uc_skill = content
-                        console.print(f"[dim cyan][explorer] loaded use case skill: {uc_name}[/dim cyan]")
+                    uc_lower = uc_name.lower()
+                    if _domain_lower in uc_lower or uc_lower in _domain_lower:
+                        content = _read_skill(f"use_cases/{uc_name}/explorer")
+                        if content:
+                            _uc_skill = content
+                            console.print(f"[dim cyan][explorer] loaded use case skill via --domain: {uc_name}[/dim cyan]")
                         break
+
+            # Fallback: scan all use_cases/*/explorer.SKILL.md files and match if
+            # any stack_decision package name appears in the skill's description.
+            # Only used when --domain wasn't passed or didn't match a folder --
+            # this heuristic is unreliable (package names rarely appear in a
+            # domain skill's own description) and shouldn't be relied on when a
+            # deterministic signal is available.
+            if not _uc_skill:
+                _stack_lower = [p.lower() for p in stack_decision]
+                if os.path.isdir(_uc_dir):
+                    for uc_name in os.listdir(_uc_dir):
+                        content = _read_skill(f"use_cases/{uc_name}/explorer")
+                        if not content:
+                            continue
+                        desc_lower = content[:500].lower()
+                        if any(pkg in desc_lower for pkg in _stack_lower):
+                            _uc_skill = content
+                            console.print(f"[dim cyan][explorer] loaded use case skill via stack match: {uc_name}[/dim cyan]")
+                            break
 
         # Force-load engine-specific skills -- deterministic, not an LLM-discretionary
         # tool call, since relying on the model to decide to load_skill("adios") is

@@ -77,6 +77,8 @@ class AgentState(TypedDict):
     engine:                str              # workflow engine: "parsl", "pycompss", etc.
     env:                   str              # execution environment: "local" or "hpc"
     condition:              str             # ablation condition: "A" (no-skills), "B" (full), "C" (single-agent)
+    domain:                str              # paper domain label, e.g. "cosmology" -- drives deterministic
+                                             # use_cases/<domain>/* skill lookup instead of keyword-matching
 
 
 # __ Pydantic Schemas __________________________________________________________
@@ -940,6 +942,7 @@ if __name__ == "__main__":
         "engine":                args.engine,
         "env":                   args.env,
         "condition":             args.condition,
+        "domain":                args.domain,
     }
 
     trace_path = os.path.join(runs_dir, _run_id + "_trace.json")
