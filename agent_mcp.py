@@ -84,9 +84,9 @@ class OrchestratorOutput(BaseModel):
     skill_requests:        list[str] = []
 
 class PlannerOutput(BaseModel):
-    literature_findings: list[str]
-    stack_decision:      list[str]
-    tasks:               list[str]
+    literature_findings: list[str]  #### findings extracted from the paper
+    stack_decision:      list[str]  #### packages to install into the local venv
+    tasks:               list[str]  #### ordered, Python-API-level implementation steps
     skill_requests:      list[str] = []
 
 class InstallerOutput(BaseModel):
