@@ -64,6 +64,24 @@ user gives a PARTIAL prompt
 A **loop-guard** ensures the clarifier runs at most once: once `clarified` is true,
 the orchestrator will not route back to it (it forces `planner` instead).
 
+### What actually triggers it (slot-coverage gate)
+Left to its own LLM judgment, the orchestrator never triggers the clarifier — it
+resolves missing details by inferring them from the repo's input files and skills,
+so even a vague prompt is judged "specified enough." To make the trigger reliable,
+the orchestrator applies a **deterministic gate** on its first routing decision:
+
+- It runs `clarifier._default_detect_fn(goal)` to count how many of the 6 spec slots
+  the user's request explicitly covers.
+- If **any** slot is missing (fewer than 6 covered) and the request hasn't been
+  clarified yet, it **hard-overrides** the route to `clarifier`.
+
+The trigger rule is mechanical ("is any slot missing?"); the LLM is only used for the
+narrower, reliable sub-task of deciding whether a given slot is mentioned. Because the
+clarifier then asks *only the missing slots*, the interaction scales with how
+underspecified the request is: a near-complete prompt is asked one question, a fully-
+specified prompt (all 6 covered) is never interrupted. The threshold is a one-line
+tunable (currently strict: all 6 required).
+
 ### Files touched
 - **`clarifier.py`** *(new)* — self-contained, UI-agnostic module. Exposes
   `run_clarifier(seed_prompt, answer_fn, fill_fn, detect_fn)`. The pluggable

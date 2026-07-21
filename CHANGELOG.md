@@ -22,6 +22,17 @@ overview and run instructions. Detailed, file-by-file changes below.
 
 ### Changed — `agent_mcp.py`
 - `import clarifier`.
+- **Slot-coverage gate (deterministic clarifier trigger).** On the first routing
+  decision (`current_step == "start"`, not yet clarified), the orchestrator runs
+  `clarifier._default_detect_fn(goal)` to count how many of the 6 spec slots the
+  user's request explicitly covers; if **any** slot is missing (`covered < 6`), it
+  hard-overrides the route to `clarifier`. This is required because, left to its own
+  judgment, the orchestrator always infers the gaps from repo files / skills and
+  never triggers the clarifier (verified across conditions A and B). The rule is
+  mechanical; the LLM is used only for the narrower "is this slot mentioned?" check.
+  Verified non-interactively: a partial prompt routes to `clarifier`, a fully-
+  specified prompt routes straight to `planner`, and the loop-guard still prevents
+  re-clarifying. Threshold is a one-line tunable (currently strict: all 6 required).
 - `OrchestratorOutput.next`: `Literal[..., "clarifier", ...]` — added `"clarifier"`.
 - `ORCHESTRATOR_SYSTEM_PROMPT` (both the full and the no-skills variant): added the
   rule to route to `clarifier` when the request is underspecified and not yet

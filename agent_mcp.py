@@ -552,6 +552,17 @@ def orchestrator(state: AgentState) -> dict:
         console.print("[dim yellow][orchestrator] already clarified -- routing to planner instead[/dim yellow]")
         result.next = "planner"
 
+    # Slot-coverage gate (deterministic clarifier trigger): on the first routing
+    # decision, treat the clarifier's 6 spec slots as a hard checklist. If the user's
+    # request leaves ANY slot unspecified, force the clarifier -- don't let the LLM
+    # decide it's "specified enough" by inferring the gaps from repo files / skills.
+    if state.get("current_step") == "start" and not state.get("clarified"):
+        _covered = clarifier._default_detect_fn(state["goal"])
+        _n = sum(1 for v in _covered.values() if str(v).strip())
+        if _n < len(clarifier.SLOT_KEYS):
+            console.print(f"[dim cyan][orchestrator] request covers only {_n}/{len(clarifier.SLOT_KEYS)} spec slots -- routing to clarifier[/dim cyan]")
+            result.next = "clarifier"
+
     panel_body = f"[bold]Routing to:[/bold] [green]{result.next}[/green]\n\n[bold]Reasoning:[/bold]\n{result.reasoning}"
     if result.feedback:
         panel_body += f"\n\n[bold]Feedback to {result.next}:[/bold]\n[yellow]{result.feedback}[/yellow]"
