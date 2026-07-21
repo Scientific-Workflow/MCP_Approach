@@ -24,7 +24,28 @@ from trace_schema import RunMetadata
 # Lives outside the repo: committing MCP_Approach should never drag run output
 # along, and the eventual Artifact ("single") approach will archive alongside
 # it under a sibling folder so the two never collide.
-ARCHIVE_ROOT = "/gpfs/fs1/home/jacob.oh/SULI/TEST_RUNS/mcp_approach"
+_HPC_ARCHIVE_ROOT = "/gpfs/fs1/home/jacob.oh/SULI/TEST_RUNS/mcp_approach"
+
+
+def _default_archive_root() -> str:
+    """Pick an archive root that actually exists on this machine.
+
+    Priority:
+      1. MCP_ARCHIVE_ROOT env var (explicit override, HPC or local).
+      2. The LCRC/HPC path, if its parent exists (teammate's HPC runs).
+      3. ~/MCP_runs as a local fallback -- so a laptop run always archives
+         somewhere instead of silently dropping the output (which is what used
+         to happen when the gpfs path wasn't creatable and no env var was set).
+    """
+    env = os.environ.get("MCP_ARCHIVE_ROOT")
+    if env:
+        return os.path.expanduser(env)
+    if os.path.isdir(os.path.dirname(_HPC_ARCHIVE_ROOT)):
+        return _HPC_ARCHIVE_ROOT
+    return os.path.expanduser("~/MCP_runs")
+
+
+ARCHIVE_ROOT = _default_archive_root()
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 _WORK_DIR = os.path.join(_REPO_ROOT, "work", "run0")
@@ -38,17 +59,59 @@ def _slugify(value: str) -> str:
     return slug or "unknown"
 
 
+def _run_name(metadata: RunMetadata) -> str:
+    """Human-readable label for the run: the paper's file name if a paper was
+    used, otherwise the use-case/domain (combination "d" has no paper)."""
+    if getattr(metadata, "paper_path", None):
+        base = os.path.splitext(os.path.basename(metadata.paper_path))[0]
+        if base:
+            return base
+    return metadata.domain or (metadata.paper_id if metadata.paper_id != "no_paper" else "") or "run"
+
+
 def _folder_name(metadata: RunMetadata) -> str:
-    date = metadata.run_id[:8] if len(metadata.run_id) >= 8 else metadata.run_id
-    usecase = metadata.domain or metadata.paper_id
-    return "__".join([
-        _slugify(date),
-        _slugify(usecase),
-        _slugify(metadata.framework),
-        _slugify(metadata.condition),
-        _slugify(metadata.combination),
-        f"trial{metadata.trial}",
-    ])
+    """<name>_<MMDD>_<HHMMSS> -- e.g. molecular_0721_105840.
+
+    name is the paper / use-case (see _run_name). The timestamp comes from
+    run_id (YYYYMMDD_HHMMSS): MMDD = chars 4:8, HHMMSS = chars 9:15. Falls back
+    to the slugified run_id if it isn't in the expected shape."""
+    rid = metadata.run_id or ""
+    if len(rid) >= 15 and rid[8] == "_":
+        stamp = f"{rid[4:8]}_{rid[9:15]}"
+    else:
+        stamp = _slugify(rid)
+    return f"{_slugify(_run_name(metadata))}_{stamp}"
+
+
+def _run_start_epoch(metadata: RunMetadata):
+    """Epoch seconds for when the run started -- from run_id (YYYYMMDD_HHMMSS) or
+    start_time. Used to archive only this run's files (mtime >= start), not the
+    stale output of previous runs that share the fixed work/run0 directory."""
+    import datetime
+    try:
+        return datetime.datetime.strptime(metadata.run_id[:15], "%Y%m%d_%H%M%S").timestamp()
+    except Exception:
+        pass
+    try:
+        return datetime.datetime.fromisoformat(metadata.start_time).timestamp()
+    except Exception:
+        return None
+
+
+def _copy_run_files(src_work: str, dest_work: str, since_epoch: float) -> None:
+    """Copy only files written during this run (mtime >= since_epoch), preserving
+    the directory structure. Skips stale outputs from earlier runs."""
+    for dirpath, _, filenames in os.walk(src_work):
+        for fn in filenames:
+            src = os.path.join(dirpath, fn)
+            try:
+                if os.path.getmtime(src) < since_epoch:
+                    continue
+            except OSError:
+                continue
+            dst = os.path.join(dest_work, os.path.relpath(src, src_work))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
 
 
 def _unique_dest(root: str, name: str) -> str:
@@ -86,7 +149,14 @@ def archive_run(metadata: RunMetadata, trace_path: str) -> str:
         os.makedirs(dest)
 
         if os.path.isdir(_WORK_DIR):
-            shutil.copytree(_WORK_DIR, os.path.join(dest, "work"))
+            # Archive only THIS run's files (mtime >= run start) so the folder isn't
+            # polluted by stale output left in the shared work/run0 by earlier runs.
+            # Fall back to a full copy if the start time can't be determined.
+            _since = _run_start_epoch(metadata)
+            if _since is not None:
+                _copy_run_files(_WORK_DIR, os.path.join(dest, "work"), _since)
+            else:
+                shutil.copytree(_WORK_DIR, os.path.join(dest, "work"))
         if os.path.isfile(trace_path):
             shutil.copy2(trace_path, os.path.join(dest, "trace.json"))
 

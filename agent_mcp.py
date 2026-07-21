@@ -41,6 +41,7 @@ from langgraph.graph.message import add_messages
 
 from mcp_explorer import explorer
 from trace_logger import tracer, extract_usage, message_to_dict
+import clarifier
 from run_archiver import archive_run
 
 load_dotenv()
@@ -51,7 +52,7 @@ _run_log_path: str = "" # path for logging run-level events in JSONL format; onl
 
 
 # __ LLM ______________________________________________________________________
-model = ChatOpenAI(model=os.getenv("MODEL_NAME", "claudesonnet46"))
+model = ChatOpenAI(model=os.getenv("MODEL_NAME", "claudesonnet46"), streaming=True)
 
 
 # __ Agent State _______________________________________________________________
@@ -77,6 +78,9 @@ class AgentState(TypedDict):
     engine:                str              # workflow engine: "parsl", "pycompss", etc.
     env:                   str              # execution environment: "local" or "hpc"
     condition:              str             # ablation condition: "A" (no-skills), "B" (full), "C" (single-agent)
+    combination:            str             # planner input combination: a=PDF+Image+Desc, b=PDF+Desc, c=Image+Desc, d=Desc Only
+    clarified_spec:         str             # Clarifier's filled 6-slot spec (fed to the planner)
+    clarified:              bool            # True once the clarifier has run (orchestrator won't re-clarify)
     domain:                str              # paper domain label, e.g. "cosmology" -- drives deterministic
                                              # use_cases/<domain>/* skill lookup instead of keyword-matching
 
@@ -85,7 +89,7 @@ class AgentState(TypedDict):
 
 class OrchestratorOutput(BaseModel):
     reasoning:           str
-    next:                  Literal["planner", "installer", "explorer", "end"]
+    next:                  Literal["clarifier", "planner", "installer", "explorer", "end"]
     feedback:              str
     requirements_approved: bool = False
     skill_requests:        list[str] = []
@@ -107,8 +111,14 @@ Your agent skill file contains your full operating instructions. Follow them.
 
 Return ONLY a valid JSON object with exactly these keys:
 - reasoning:           str -- your analysis of the current state
-- next:                "planner" | "installer" | "explorer" | "end"
+- next:                "clarifier" | "planner" | "installer" | "explorer" | "end"
 - feedback:            str -- specific actionable feedback for the receiving agent, or "" if proceeding normally
+
+CLARIFIER (optional, at most once): if the user's request is underspecified -- missing
+key details needed to plan a runnable workflow (goal, software, input data, parameters,
+expected outputs, environment/scale) -- and it has NOT been clarified yet, route to
+"clarifier". It asks the user only the missing questions and produces a clarified spec.
+Once "clarified" is true, do NOT route to clarifier again; proceed to planner.
 - requirements_approved: bool -- true ONLY when approving pending requirements.txt, false in all other cases
 - skill_requests:      list[str] -- skill paths to load (first call only; empty on subsequent calls)
 \
@@ -163,8 +173,14 @@ by reviewing the `requirements_content` in the state below. In every other situa
 
 Return ONLY a valid JSON object with exactly these keys:
 - reasoning:           str -- your analysis of the current state
-- next:                "planner" | "installer" | "explorer" | "end"
+- next:                "clarifier" | "planner" | "installer" | "explorer" | "end"
 - feedback:            str -- specific actionable feedback for the receiving agent, or "" if proceeding normally
+
+CLARIFIER (optional, at most once): if the user's request is underspecified -- missing
+key details needed to plan a runnable workflow (goal, software, input data, parameters,
+expected outputs, environment/scale) -- and it has NOT been clarified yet, route to
+"clarifier". It asks the user only the missing questions and produces a clarified spec.
+Once "clarified" is true, do NOT route to clarifier again; proceed to planner.
 - requirements_approved: bool -- true ONLY when approving pending requirements.txt, false in all other cases
 - skill_requests:      list[str] -- always leave this empty; no skill content is available in this run
 \
@@ -389,6 +405,30 @@ def _list_skills(folder: str) -> list:
 
 # __ Nodes _____________________________________________________________________
 
+def clarifier_node(state: AgentState) -> dict:
+    """Optional node -- the orchestrator routes here when the request is underspecified.
+
+    Asks the user ONLY the missing slots (slots the prompt already covers are inferred;
+    slots the user leaves blank are assumed by the LLM), and produces a clarified spec
+    the planner then uses. Runs at most once (orchestrator's loop-guard)."""
+    console.print("\n[dim cyan][clarifier] request underspecified -- asking the missing questions...[/dim cyan]")
+    tracer.log_agent_start("clarifier")
+    tracer.log_agent_input("clarifier", {"goal": state.get("goal", "")})
+
+    _clar = clarifier.run_clarifier(state["goal"])   # CLI answers + LLM detect/fill
+    console.print(Panel(_clar["clarified_spec"], title="[bold cyan]Clarified Spec[/bold cyan]", border_style="cyan"))
+
+    tracer.log_agent_output("clarifier", {
+        "asked": _clar["asked"], "slots": _clar["slots"], "assumptions": _clar["assumptions"],
+    })
+    tracer.log_agent_end("clarifier")
+    return {
+        "clarified_spec": _clar["clarified_spec"],
+        "clarified":      True,
+        "current_step":   "clarifier_complete",
+    }
+
+
 ############################################################################# ORCHESTRATOR ##############################################################
 
 def orchestrator(state: AgentState) -> dict:
@@ -412,6 +452,9 @@ def orchestrator(state: AgentState) -> dict:
         console.print(f"[dim yellow][orchestrator] revision counts -- {rev_str}[/dim yellow]")
 
     parts = [f"Goal: {state['goal']}", f"Current step: {state['current_step']}"]
+    parts.append(f"Request clarified so far: {'yes' if state.get('clarified') else 'no'}")
+    if state.get("clarified_spec"):
+        parts.append(f"Clarified spec (use this as the task description):\n{state['clarified_spec']}")
     if any(revisions.values()):
         parts.append("Revision counts so far: " +
                      ", ".join(f"{k}={v}" for k, v in revisions.items()))
@@ -504,6 +547,11 @@ def orchestrator(state: AgentState) -> dict:
                 console.print("[dim yellow][orchestrator] explorer already revised once with results -- ending[/dim yellow]")
                 result.next = "end"
 
+    # Loop-guard: clarify at most once -- if already clarified, don't route to clarifier again.
+    if result.next == "clarifier" and state.get("clarified"):
+        console.print("[dim yellow][orchestrator] already clarified -- routing to planner instead[/dim yellow]")
+        result.next = "planner"
+
     panel_body = f"[bold]Routing to:[/bold] [green]{result.next}[/green]\n\n[bold]Reasoning:[/bold]\n{result.reasoning}"
     if result.feedback:
         panel_body += f"\n\n[bold]Feedback to {result.next}:[/bold]\n[yellow]{result.feedback}[/yellow]"
@@ -556,9 +604,13 @@ def planner(state: AgentState) -> dict:
         tracer.log_agent_start("planner")
         tracer.log_agent_input("planner", {"pdf_path": state["pdf_path"], "goal": state["goal"]})
 
-        reader = PdfReader(state["pdf_path"])
-        pdf_text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
-        console.print(f"[dim cyan][planner] loaded {len(reader.pages)} pages[/dim cyan]")
+        if state.get("pdf_path"):
+            reader = PdfReader(state["pdf_path"])
+            pdf_text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
+            console.print(f"[dim cyan][planner] loaded {len(reader.pages)} pages[/dim cyan]")
+        else:
+            pdf_text = ""
+            console.print("[dim cyan][planner] no PDF -- planning from the clarified spec / goal[/dim cyan]")
 
         feedback = state.get("orchestrator_feedback", "")
         feedback_section = (f"\n\nOrchestrator feedback -- address these issues before returning:\n{feedback}"
@@ -584,7 +636,10 @@ def planner(state: AgentState) -> dict:
         _data_files = state.get("selected_data_files", [])
         _data_section = (f"\n\nAvailable input data files (in /app/data/):\n" +
                          "\n".join(f"  - {f}" for f in _data_files)) if _data_files else ""
-        _human = f"Goal: {state['goal']}{_data_section}\n\nPaper:\n{pdf_text}{feedback_section}"
+        _spec = state.get("clarified_spec", "")
+        _spec_section = f"\n\nTask specification (from clarifier):\n{_spec}" if _spec else ""
+        _paper_section = f"\n\nPaper:\n{pdf_text}" if pdf_text else ""
+        _human = f"Goal: {state['goal']}{_data_section}{_spec_section}{_paper_section}{feedback_section}"
 
         # Build human message -- multimodal if an image was provided
         if state.get("image_path"):
@@ -758,6 +813,7 @@ def route_orchestrator(state: AgentState) -> str:
 graph = StateGraph(AgentState)
 
 graph.add_node("orchestrator", orchestrator)
+graph.add_node("clarifier",    clarifier_node)
 graph.add_node("planner",      planner)
 graph.add_node("installer",    installer)
 graph.add_node("explorer",     explorer)
@@ -765,15 +821,17 @@ graph.add_node("explorer",     explorer)
 graph.set_entry_point("orchestrator")
 
 graph.add_conditional_edges("orchestrator", route_orchestrator, {
+    "clarifier": "clarifier",
     "planner":   "planner",
     "installer": "installer",
     "explorer":  "explorer",
     "end":       END,
 })
 
-graph.add_edge("planner",   "orchestrator")
-graph.add_edge("installer", "orchestrator")
-graph.add_edge("explorer",  "orchestrator")
+graph.add_edge("clarifier",  "orchestrator")
+graph.add_edge("planner",    "orchestrator")
+graph.add_edge("installer",  "orchestrator")
+graph.add_edge("explorer",   "orchestrator")
 
 app = graph.compile()
 
@@ -809,44 +867,55 @@ if __name__ == "__main__":
 
     console.print(Panel(f"[bold blue]MAW -- Multi-Agent Workflow (MCP Approach)[/bold blue]\n[dim]Engine: {args.engine} | Env: {args.env}[/dim]", border_style="blue"))
 
+    # Which inputs this run uses: a=PDF+Image+Desc, b=PDF+Desc, c=Image+Desc, d=Desc Only
+    _NEEDS_PDF   = args.combination in ("a", "b")
+    _NEEDS_IMAGE = args.combination in ("a", "c")
+
     lit_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Literature")
     os.makedirs(lit_dir, exist_ok=True)
 
-    pdfs = [f for f in os.listdir(lit_dir) if f.lower().endswith(".pdf")]
-    if not pdfs:
-        console.print("[red]No PDFs found in the Literature/ folder. Add a paper and try again.[/red]")
-        raise SystemExit(1)
-
-    console.print("\n[bold]Available papers:[/bold]")
-    for i, name in enumerate(pdfs, 1):
-        console.print(f"  {i}. {name}")
-
-    # Handle paper selection
-    if args.paper:
-        choice = args.paper
-        try:
-            pdf_path = os.path.join(lit_dir, pdfs[int(choice) - 1])
-        except (ValueError, IndexError):
-            pdf_path = os.path.join(lit_dir, choice)
-            if not os.path.isfile(pdf_path):
-                console.print(f"[red]Paper not found: {choice}[/red]")
-                raise SystemExit(1)
+    # Handle paper selection (only for combinations that include a PDF)
+    if not _NEEDS_PDF:
+        pdf_path = ""
+        console.print(f"[dim]Combination '{args.combination}' has no PDF -- skipping paper selection.[/dim]")
     else:
-        choice = input("\nSelect a paper by number: ").strip()
-        try:
-            pdf_path = os.path.join(lit_dir, pdfs[int(choice) - 1])
-        except (ValueError, IndexError):
-            console.print("[red]Invalid selection.[/red]")
+        pdfs = [f for f in os.listdir(lit_dir) if f.lower().endswith(".pdf")]
+        if not pdfs:
+            console.print("[red]No PDFs found in the Literature/ folder. Add a paper and try again.[/red]")
             raise SystemExit(1)
 
-    console.print(f"[dim]Selected: {os.path.basename(pdf_path)}[/dim]")
+        console.print("\n[bold]Available papers:[/bold]")
+        for i, name in enumerate(pdfs, 1):
+            console.print(f"  {i}. {name}")
 
-    # Handle image selection
+        if args.paper:
+            choice = args.paper
+            try:
+                pdf_path = os.path.join(lit_dir, pdfs[int(choice) - 1])
+            except (ValueError, IndexError):
+                pdf_path = os.path.join(lit_dir, choice)
+                if not os.path.isfile(pdf_path):
+                    console.print(f"[red]Paper not found: {choice}[/red]")
+                    raise SystemExit(1)
+        else:
+            choice = input("\nSelect a paper by number: ").strip()
+            try:
+                pdf_path = os.path.join(lit_dir, pdfs[int(choice) - 1])
+            except (ValueError, IndexError):
+                console.print("[red]Invalid selection.[/red]")
+                raise SystemExit(1)
+
+        console.print(f"[dim]Selected: {os.path.basename(pdf_path)}[/dim]")
+
+    # Handle image selection (only for combinations that include an image)
     _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
     images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
     os.makedirs(images_dir, exist_ok=True)
 
-    if args.image:
+    if not _NEEDS_IMAGE:
+        image_path = ""
+        console.print(f"[dim]Combination '{args.combination}' has no image -- skipping image selection.[/dim]")
+    elif args.image:
         image_path = args.image if os.path.isabs(args.image) else os.path.join(images_dir, args.image)
         if not os.path.isfile(image_path):
             console.print(f"[red]Image not found: {args.image}[/red]")
@@ -915,6 +984,9 @@ if __name__ == "__main__":
         console.print("[red]Goal cannot be empty.[/red]")
         raise SystemExit(1)
 
+    # The Clarifier is no longer a pre-processing step. It is now an optional graph node
+    # the orchestrator routes to on demand (when the request is underspecified), asking
+    # only the missing slots. See clarifier_node() and the ORCHESTRATOR_SYSTEM_PROMPT.
     runs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs")
     os.makedirs(runs_dir, exist_ok=True)
     _run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -943,6 +1015,9 @@ if __name__ == "__main__":
         "env":                   args.env,
         "condition":             args.condition,
         "domain":                args.domain,
+        "combination":           args.combination,
+        "clarified_spec":        "",
+        "clarified":             False,
     }
 
     trace_path = os.path.join(runs_dir, _run_id + "_trace.json")

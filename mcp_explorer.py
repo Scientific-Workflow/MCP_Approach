@@ -696,6 +696,7 @@ async def _explorer_async(state: dict, engine: str) -> dict:
         # Initialize LLM with tool binding
         llm = ChatOpenAI(
             model=os.getenv("CODER_MODEL_NAME", os.getenv("MODEL_NAME", "claudesonnet46")),
+            streaming=True,
         )
         llm_with_tools = llm.bind_tools(_tools_for_engine(engine))
 
