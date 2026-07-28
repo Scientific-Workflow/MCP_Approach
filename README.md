@@ -162,6 +162,8 @@ interface the evaluation consumes.
 The project evolved in seven phases (Jun 11 – Jul 21, 2026). Reading this in order shows
 *why* the system is shaped the way it is.
 
+![Development timeline — 7 phases, 40 commits](docs/timeline.png)
+
 ### Phase 1 — Foundation: MCP-as-Tool (Jun 11)
 The core idea landed first: expose the workflow engine as an MCP server the agent calls
 interactively, instead of generating a standalone script. Auto use-case matching and
