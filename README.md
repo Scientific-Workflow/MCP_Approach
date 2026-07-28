@@ -1,6 +1,6 @@
 # MAW — Multi-Agent Workflow (MCP Approach)
 
-> **LLM agents that turn a described scientific workflow into a *running* one — installing the software, generating the code, and executing it through MCP, across three workflow engines, with zero changes to the agent code.**
+> 🤖 **LLM agents that turn a described scientific workflow into a *running* one — installing the software, generating the code, and executing it through MCP, across three workflow engines, with zero changes to the agent code.** ⚙️🔬
 
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![LangGraph](https://img.shields.io/badge/LangGraph-supervisor-6C5CE7)
@@ -20,14 +20,14 @@ This branch (`local_final_version`) is the final state of the SULI 2026 internsh
 ---
 
 ## Table of contents
-1. [What this is](#1-what-this-is)
-2. [Quick start](#2-quick-start)
-3. [Architecture map](#3-architecture-map)
-4. [Development timeline](#4-development-timeline) ← *read this to understand how the system got here*
-5. [Key design decisions](#5-key-design-decisions)
-6. [Known limitations & gotchas](#6-known-limitations--gotchas)
-7. [Where to go next](#7-where-to-go-next)
-8. [Repository map](#8-repository-map)
+1. 🧭 [What this is](#1-what-this-is)
+2. 🚀 [Quick start](#2-quick-start)
+3. 🏗️ [Architecture map](#3-architecture-map)
+4. ⏳ [Development timeline](#4-development-timeline) ← *read this to understand how the system got here*
+5. 🧠 [Key design decisions](#5-key-design-decisions)
+6. ⚠️ [Known limitations & gotchas](#6-known-limitations--gotchas)
+7. 🔮 [Where to go next](#7-where-to-go-next)
+8. 🗂️ [Repository map](#8-repository-map)
 
 ---
 
@@ -295,6 +295,6 @@ output **archiving** was added so each run lands in its own self-describing fold
 
 ---
 
-*Handoff note: start with §4 (timeline) to understand the "why", then §2 to run it, then
+*👋 Handoff note: start with §4 (timeline) to understand the "why", then §2 to run it, then
 §6 before debugging anything. The most load-bearing files are `agent_mcp.py` (the graph) and
-`servers/*.py` (the engines).*
+`servers/*.py` (the engines). Good luck, and have fun! 🚀🔬🎉*
