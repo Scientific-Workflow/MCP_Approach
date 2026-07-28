@@ -1,5 +1,13 @@
 # MAW — Multi-Agent Workflow (MCP Approach)
 
+> **LLM agents that turn a described scientific workflow into a *running* one — installing the software, generating the code, and executing it through MCP, across three workflow engines, with zero changes to the agent code.**
+
+![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-supervisor-6C5CE7)
+![MCP](https://img.shields.io/badge/Protocol-MCP-0984E3)
+![Engines](https://img.shields.io/badge/Engines-Parsl%20%C2%B7%20PyCOMPSs%20%C2%B7%20ADIOS2-00B894)
+![SULI 2026](https://img.shields.io/badge/SULI-2026%20final-E1A100)
+
 A team of LLM agents that turns a natural-language description of a scientific workflow —
 a published paper, a plain-language goal, or a workflow diagram — into a **running**
 workflow: it identifies the tasks, installs the software, generates the code, executes the
@@ -163,6 +171,9 @@ The project evolved in seven phases (Jun 11 – Jul 21, 2026). Reading this in o
 *why* the system is shaped the way it is.
 
 ![Development timeline — 7 phases, 40 commits](docs/timeline.png)
+
+<sub>*Regenerate after new work with `python docs/make_timeline.py` (edit the `PHASES` /
+`MILES` lists in that script to add a phase).*</sub>
 
 ### Phase 1 — Foundation: MCP-as-Tool (Jun 11)
 The core idea landed first: expose the workflow engine as an MCP server the agent calls
