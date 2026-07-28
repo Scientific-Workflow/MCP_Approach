@@ -45,8 +45,7 @@ the MCP server behind the interface is swapped.
 Reproducing a published paper is the framework's most demanding *test case*, not its
 objective: the system accepts any natural-language goal, with or without a paper.
 
-For the design rationale and evaluation, see `SULI_Research_Report_v2.md` (the framework
-report) and the SC workshop paper.
+For the design rationale and evaluation, see the SC workshop paper.
 
 ---
 
@@ -94,9 +93,11 @@ python agent_mcp.py --combination b --env hpc --engine parsl \
 
 ### Where the output goes
 - During a run: `work/run0/` (a single shared scratch directory — see §6).
-- After a run: `run_archiver.py` copies that run's outputs + `trace.json` into a
-  self-describing folder under `MCP_ARCHIVE_ROOT` (e.g.
-  `~/MCP_runs/<usecase>_<MMDD>_<HHMMSS>/`).
+- **After a run: each run's results are automatically organized into their own folder so
+  they never get mixed up between runs.** `run_archiver.py` copies that run's outputs +
+  `trace.json` into a self-describing folder named `<usecase>_<MMDD>_<HHMMSS>` under
+  `MCP_ARCHIVE_ROOT` — locally this is **`~/MCP_runs/`** (on HPC, the LCRC gpfs path).
+  **Look here for a finished run's figures/data**, not in the shared `work/run0/`.
 - Traces: `runs/<timestamp>_trace.json`. Visualize them with `demo_workflow.ipynb`.
 
 ### CLI reference
@@ -294,7 +295,6 @@ output **archiving** was added so each run lands in its own self-describing fold
 | `builds/requirements.txt` | Agent-side Python dependencies. |
 | `TEST_RUNS/mcp_approach/` | Archived HPC traces for the 3×3 evaluation matrix. |
 | `PROJECT_CONTEXT.md` | Project vision + artifact-vs-MCP rationale. |
-| `SULI_Research_Report_v2.md` | The framework report (design write-up). |
 | `README_clarifier_archive.md`, `CHANGELOG.md` | Details of the final (clarifier + archive) phase. |
 | `mcp_tools.py` | Currently unused; retained (see its header for rationale). |
 
