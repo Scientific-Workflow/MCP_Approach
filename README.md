@@ -16,9 +16,6 @@ as an **MCP (Model Context Protocol) server** that the agent calls step by step,
 emitting a single monolithic script.
 
 This branch (`local_final_version`) is the final state of the SULI 2026 internship work.
-It is the implementation behind the SC workshop paper *"Agentic Scientific Workflows: A
-General Multi-Agent Framework for End-to-End Workflow Automation"* (Yildiz, Oh, Swenson,
-Peterka).
 
 ---
 
@@ -44,8 +41,6 @@ the MCP server behind the interface is swapped.
 
 Reproducing a published paper is the framework's most demanding *test case*, not its
 objective: the system accepts any natural-language goal, with or without a paper.
-
-For the design rationale and evaluation, see the SC workshop paper.
 
 ---
 
