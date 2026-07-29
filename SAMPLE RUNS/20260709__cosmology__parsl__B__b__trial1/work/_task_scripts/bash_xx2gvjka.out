@@ -1,0 +1,35 @@
+Reading snapshot: /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/output/full_snapshots/step_624/m000p.full.mpicosmo.624
+Parsed 262144 particles
+x range [0.000, 64.000]  y [0.000, 64.000]  z [0.000, 64.000]
+Particle mass mp = 8.593774e+10 h^-1 Msun (Omega_m=0.30964)
+Reading halo catalog: /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/analysis/haloproperties/step_624/m000p-624.haloproperties
+Parsed 685 halos, columns=76
+most massive SOD halo: M_200c=3.281963e+14 h^-1 Msun, R_200c=1.1221 Mpc/h, center=(30.9774, 37.3307, 18.4439)
+Slice: cz=18.4439, thickness=4.0 Mpc/h, 34879 particles in slab
+Wrote /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0/dm_density_slice.png
+Wrote /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0/summary.txt
+HACC Last Journey SampleRun -- reproduction summary
+============================================================
+Snapshot step               : 624 (z=0)
+Box length RL               : 64.000 h^-1 Mpc
+Grid NG                     : 64
+Particles per side NP       : 64 (262144 total expected)
+Particles parsed            : 262144
+Omega_cdm                   : 0.26067
+Omega_b (=DEUT/h^2)         : 0.04897
+Omega_m                     : 0.30964
+Hubble h                    : 0.6766
+Particle mass mp            : 8.593774e+10 h^-1 Msun
+FOF linking length b        : 0.168
+SOD overdensity Delta       : 200 (M_200c)
+------------------------------------------------------------
+Most massive halo           : most massive SOD halo: M_200c=3.281963e+14 h^-1 Msun, R_200c=1.1221 Mpc/h, center=(30.9774, 37.3307, 18.4439)
+  M_200c                    : 3.281963e+14 h^-1 Msun
+  center (x,y,z)            : (30.9774, 37.3307, 18.4439) h^-1 Mpc
+------------------------------------------------------------
+Density slice thickness     : 4.0 h^-1 Mpc
+Slice center z              : 18.4439 h^-1 Mpc
+Particles in slab           : 34879
+Slice grid                  : 256 x 256 bins
+Output image                : dm_density_slice.png
+DONE

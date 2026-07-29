@@ -1,0 +1,11 @@
+=== work dir ===
+total 22
+drwxr-xr-x 6 jacob.oh cels   8192 Jul  8 16:27 .
+drwxr-xr-x 3 jacob.oh cels   4096 Jun 30 11:43 ..
+drwxr-xr-x 3 jacob.oh cels   4096 Jul  8 16:26 .parsl
+-rw-r--r-- 1 jacob.oh cels   1013 Jul  8 16:27 AW.tersoff
+drwxr-xr-x 2 jacob.oh cels   4096 Jul  8 16:27 _task_scripts
+-rw-r--r-- 1 jacob.oh cels 343393 Jul  8 16:27 data.init
+drwxr-xr-x 2 jacob.oh cels   4096 Jul  8 16:27 frames
+-rw-r--r-- 1 jacob.oh cels    948 Jul  8 16:27 in.watbox
+drwxr-xr-x 2 jacob.oh cels   4096 Jul  8 16:27 renders

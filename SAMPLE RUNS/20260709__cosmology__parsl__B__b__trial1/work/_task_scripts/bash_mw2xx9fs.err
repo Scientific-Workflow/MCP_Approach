@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && cp /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0/agent_subme.pbs /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/agent_subme.pbs && echo "copied" && cd /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go && qsub agent_subme.pbs'
+--> end executable <--

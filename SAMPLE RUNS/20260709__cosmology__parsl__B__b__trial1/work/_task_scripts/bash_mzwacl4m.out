@@ -1,0 +1,59 @@
+=== top level ===
+total 133448
+drwxr-x---+ 6 jacob.oh cels    4096 Jul  9 13:29 .
+drwxr-x---+ 4 jacob.oh cels    4096 Jun 23 10:12 ..
+drwxrwx---+ 2 jacob.oh cels    4096 Jul  9 11:25 _task_scripts
+-rw-r-----+ 1 jacob.oh cels 6821551 Jul  9 12:58 agent_hacc_run.o7648262
+-rw-r-----+ 1 jacob.oh cels 6821546 Jul  9 13:26 agent_hacc_run.o7648285
+-rw-r-----+ 1 jacob.oh cels 6821548 Jul  9 13:38 agent_hacc_run.o7648297
+-rw-r-----+ 1 jacob.oh cels 6822630 Jul  7 15:21 agent_lastjourney_8r.o7646508
+-rw-r-----+ 1 jacob.oh cels 6827913 Jul  8 11:49 agent_lastjourney_8r.o7647249
+-rw-r-----+ 1 jacob.oh cels 6826689 Jul  8 11:58 agent_lastjourney_8r.o7647252
+-rw-r-----+ 1 jacob.oh cels 6822901 Jul  8 17:36 agent_lastjourney_8r.o7647427
+-rw-r-----+ 1 jacob.oh cels 6826597 Jul  9 08:39 agent_lastjourney_8r.o7647959
+-rw-r-----+ 1 jacob.oh cels 6821580 Jul  9 13:00 agent_lastjourney_8r.o7648265
+-rw-r-----+ 1 jacob.oh cels 6826603 Jul  7 15:44 agent_ljourney_8r.o7646539
+-rw-r-----+ 1 jacob.oh cels 6826663 Jul  7 16:20 agent_ljourney_8r.o7646565
+-rw-r-----+ 1 jacob.oh cels 6821626 Jul  8 10:57 agent_ljourney_8r.o7647212
+-rw-r-----+ 1 jacob.oh cels    1750 Jul  9 13:29 agent_subme.pbs
+-rw-r-----+ 1 jacob.oh cels 6821873 Jul  9 11:39 agent_subme_run0.o7648172
+drwxrwx---+ 7 jacob.oh cels    4096 Jul  9 09:20 analysis
+-rw-r-----+ 1 jacob.oh cels 6822637 Jul  9 09:31 lastjourney_8r_agent.o7647998
+-rw-r-----+ 1 jacob.oh cels 6821593 Jul  9 09:48 lastjourney_8r_agent.o7648028
+-rw-r-----+ 1 jacob.oh cels 6821596 Jul  9 13:43 lastjourney_agent.o7648299
+-rw-r-----+ 1 jacob.oh cels 6821581 Jul  7 11:11 lastjourney_agent_8r.o7646343
+-rw-r-----+ 1 jacob.oh cels 6821622 Jul  8 17:14 lastjourney_agent_8r.o7647403
+-rw-r-----+ 1 jacob.oh cels 6821586 Jul  9 13:29 lastjourney_agent_8r.o7648286
+-rw-r-----+ 1 jacob.oh cels 6821607 Jul  9 11:18 lastjourney_agent_run0.o7648159
+drwxrwx---+ 7 jacob.oh cels    4096 Jun 23 10:30 output
+drwxr-x---+ 2 jacob.oh cels    4096 Jun 23 10:12 params
+-rw-r-----+ 1 jacob.oh cels    1186 Jun 23 10:12 subme.openmp4.pbs
+-rw-r-----+ 1 jacob.oh cels    1087 Jun 23 10:26 subme.pbs
+=== params ===
+total 579
+drwxr-x---+ 2 jacob.oh cels   4096 Jun 23 10:12 .
+drwxr-x---+ 6 jacob.oh cels   4096 Jul  9 13:29 ..
+-rwxr-x---+ 1 jacob.oh cels 515592 Jun 23 10:12 cmbM000P.tf
+-rw-r-----+ 1 jacob.oh cels   6575 Jun 23 10:12 cosmotools-config.dat
+-rw-r-----+ 1 jacob.oh cels   6570 Jun 23 10:12 cosmotools-config_pp.dat
+-rw-r-----+ 1 jacob.oh cels      4 Jun 23 10:12 halosteps.dat
+-rw-r-----+ 1 jacob.oh cels   5859 Jun 23 10:12 indat.orig.params
+-rw-r-----+ 1 jacob.oh cels   5860 Jun 23 10:12 indat.params
+=== output ===
+total 7
+drwxrwx---+ 7 jacob.oh cels 4096 Jun 23 10:30 .
+drwxr-x---+ 6 jacob.oh cels 4096 Jul  9 13:29 ..
+drwxrwx---+ 5 jacob.oh cels 4096 Jul  8 17:36 full_snapshots
+drwxrwx---+ 2 jacob.oh cels 4096 Jun 23 10:27 mem_distribution
+drwxrwx---+ 2 jacob.oh cels 4096 Jun 23 10:27 params
+drwxrwx---+ 2 jacob.oh cels 4096 Jun 23 10:41 power_spectra
+drwxrwx---+ 2 jacob.oh cels 4096 Jun 23 10:27 repo
+=== analysis ===
+total 7
+drwxrwx---+ 7 jacob.oh cels 4096 Jul  9 09:20 .
+drwxr-x---+ 6 jacob.oh cels 4096 Jul  9 13:29 ..
+drwxrwx---+ 5 jacob.oh cels 4096 Jul  9 09:31 bighaloparticles
+drwxrwx---+ 5 jacob.oh cels 4096 Jul  9 09:31 haloparticles
+drwxrwx---+ 5 jacob.oh cels 4096 Jul  9 09:31 haloparticletags
+drwxrwx---+ 5 jacob.oh cels 4096 Jul  9 09:31 haloproperties
+drwxrwx---+ 5 jacob.oh cels 4096 Jul  9 09:31 sodpropertybins

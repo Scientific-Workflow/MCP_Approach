@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && module load lammps/22Jul2025 >/dev/null 2>&1 && cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && env -u PMI_SIZE -u PMI_RANK -u I_MPI_HYDRA_BOOTSTRAP mpirun -n 8 lmp -in in.watbox'
+--> end executable <--

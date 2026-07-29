@@ -1,0 +1,83 @@
+======= LAST 30 LINES RAW =======
+sc         done$
+cosmoTExtr  max  2.685e+00 s  avg  2.685e+00 s  min  2.685e+00 s  maxrank 1  minrank 4 maxname i109 minname i109 $
+fftb        max  4.272e+00 s  avg  4.049e+00 s  min  3.781e+00 s  maxrank 7  minrank 0 maxname i109 minname i109 $
+xch         max  3.789e-01 s  avg  3.788e-01 s  min  3.787e-01 s  maxrank 0  minrank 4 maxname i109 minname i109 $
+cici        max  4.440e+00 s  avg  3.826e+00 s  min  3.153e+00 s  maxrank 6  minrank 3 maxname i109 minname i109 $
+sc          max  8.288e+02 s  avg  8.288e+02 s  min  8.288e+02 s  maxrank 4  minrank 0 maxname i109 minname i109 $
+scp        done$
+LightCone  done$
+map2s      done$
+map2b      done$
+map2q      done$
+map2w      done$
+map2c      done$
+m2_w       done$
+m2_b       done$
+m2_t       done$
+scp         max  0.000e+00 s  avg  0.000e+00 s  min  0.000e+00 s  maxrank 0  minrank 0 maxname i109 minname i109 $
+LightCone   max  0.000e+00 s  avg  0.000e+00 s  min  0.000e+00 s  maxrank 0  minrank 0 maxname i109 minname i109 $
+map2s       max  2.093e+01 s  avg  1.901e+01 s  min  1.679e+01 s  maxrank 6  minrank 3 maxname i109 minname i109 $
+map2b       max  3.261e+01 s  avg  2.692e+01 s  min  2.198e+01 s  maxrank 6  minrank 3 maxname i109 minname i109 $
+map2q       max  6.822e+00 s  avg  6.165e+00 s  min  5.434e+00 s  maxrank 6  minrank 3 maxname i109 minname i109 $
+map2w       max  7.617e+02 s  avg  5.359e+02 s  min  3.314e+02 s  maxrank 2  minrank 3 maxname i109 minname i109 $
+map2c       max  9.917e-01 s  avg  8.687e-01 s  min  7.096e-01 s  maxrank 6  minrank 3 maxname i109 minname i109 $
+m2_w        max  8.220e+02 s  avg  5.926e+02 s  min  3.822e+02 s  maxrank 2  minrank 3 maxname i109 minname i109 $
+m2_b        max  1.207e-04 s  avg  1.178e-04 s  min  1.160e-04 s  maxrank 4  minrank 1 maxname i109 minname i109 $
+m2_t        max  4.453e+02 s  avg  2.349e+02 s  min  5.484e+00 s  maxrank 3  minrank 2 maxname i109 minname i109 $
+=== hacc_tpm finished; starting analysis+render ===$
+  File "/gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0/analyze_and_render.py", line 2$
+    """$
+IndentationError: unexpected indent$
+
+======= grep python/analyze/GenericIO/Traceback whole file =======
+105128:total alive density   = 262144.057373
+105308:total alive density   = 262144.054697
+105488:total alive density   = 262144.050639
+105668:total alive density   = 262144.047565
+105848:total alive density   = 262144.055646
+106028:total alive density   = 262144.053789
+106208:total alive density   = 262144.064799
+106388:total alive density   = 262144.058318
+106568:total alive density   = 262144.056274
+106748:total alive density   = 262144.059666
+106928:total alive density   = 262144.069395
+107108:total alive density   = 262144.077968
+107288:total alive density   = 262144.098005
+107468:total alive density   = 262144.087925
+107648:total alive density   = 262144.095173
+107828:total alive density   = 262144.095932
+108008:total alive density   = 262144.093809
+108188:total alive density   = 262144.114024
+108368:total alive density   = 262144.107454
+108548:total alive density   = 262144.119918
+108728:total alive density   = 262144.134360
+108908:total alive density   = 262144.146003
+109088:total alive density   = 262144.174531
+109268:total alive density   = 262144.176299
+109448:total alive density   = 262144.172262
+109628:total alive density   = 262144.187058
+109808:total alive density   = 262144.193438
+109988:total alive density   = 262144.197409
+110168:total alive density   = 262144.197587
+110348:total alive density   = 262144.194301
+110528:total alive density   = 262144.198022
+110708:total alive density   = 262144.193974
+110888:total alive density   = 262144.204965
+111068:total alive density   = 262144.188985
+111248:total alive density   = 262144.191847
+111428:total alive density   = 262144.194881
+111608:total alive density   = 262144.182339
+111788:total alive density   = 262144.193078
+111968:total alive density   = 262144.191552
+112148:total alive density   = 262144.194872
+112328:total alive density   = 262144.215627
+112508:total alive density   = 262144.217224
+112688:total alive density   = 262144.217010
+112868:total alive density   = 262144.214329
+113048:total alive density   = 262144.218580
+113228:total alive density   = 262144.214438
+113408:total alive density   = 262144.214687
+113588:total alive density   = 262144.200633
+113807:  File "/gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0/analyze_and_render.py", line 2
+113809:IndentationError: unexpected indent

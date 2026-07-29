@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && ls -la /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/venv3/bin/python3 2>&1 || (echo "trying to locate venv"; find /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach -maxdepth 3 -name python3 -path "*bin*" 2>/dev/null | head)'
+--> end executable <--

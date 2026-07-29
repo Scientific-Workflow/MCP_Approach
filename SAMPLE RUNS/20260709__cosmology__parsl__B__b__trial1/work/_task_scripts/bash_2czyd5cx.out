@@ -1,0 +1,9 @@
+=== pwd/repo ===
+/gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0
+=== hacc_tpm ===
+-rwxr-x---+ 1 jacob.oh cels 48079320 Jun 23 10:13 /lcrc/project/PEDAL/jacoboh/HACC/HACC_go/improv.cpu/mpi/bin/hacc_tpm
+=== GenericIOPrint locations ===
+-rwxr-x---+ 1 jacob.oh cels 9081824 Jun 23 10:13 /lcrc/project/PEDAL/jacoboh/HACC/HACC_go/improv.cpu/frontend/bin/GenericIOPrint
+-rwxr-x---+ 1 jacob.oh cels 9860656 Jun 23 10:13 /lcrc/project/PEDAL/jacoboh/HACC/HACC_go/improv.cpu/mpi/bin/GenericIOPrint
+=== envfile ===
+-rw-r-----+ 1 jacob.oh cels 2197 Jun 23 10:13 /lcrc/project/PEDAL/jacoboh/HACC/HACC_go/env/bashrc.improv.cpu

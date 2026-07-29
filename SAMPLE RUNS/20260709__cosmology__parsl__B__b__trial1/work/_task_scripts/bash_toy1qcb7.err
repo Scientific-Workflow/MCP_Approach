@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && echo "======= LAST 30 LINES RAW ======="; tail -30 /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/agent_hacc_run.o7648318 | cat -A | tail -30; echo; echo "======= grep python/analyze/GenericIO/Traceback whole file ======="; grep -n -iE "analyze_and_render|Traceback|Error:|GenericIOPrint|most massive|density|summary.txt|dm_density|ModuleNotFound|python3" /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/agent_hacc_run.o7648318 | tail -50'
+--> end executable <--

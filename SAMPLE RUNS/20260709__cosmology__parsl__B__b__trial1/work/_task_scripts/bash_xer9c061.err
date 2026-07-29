@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && ls -la /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/*.o* /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/agent_hacc_run.* 2>&1 | tail -20; echo "----RECENT----"; ls -lat /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/ | head -30'
+--> end executable <--

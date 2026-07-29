@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && ls -la dm_density_slice.png summary.txt particles_step624.npz 2>&1; echo "=== PNG type ==="; file dm_density_slice.png; echo "=== summary.txt ==="; cat summary.txt'
+--> end executable <--

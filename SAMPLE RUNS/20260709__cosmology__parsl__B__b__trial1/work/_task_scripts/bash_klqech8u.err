@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && cd /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go && echo "=== top level ===" && ls -la && echo "=== params ===" && ls -la params/ && echo "=== output ===" && ls -la output/ && echo "=== analysis ===" && ls -la analysis/'
+--> end executable <--

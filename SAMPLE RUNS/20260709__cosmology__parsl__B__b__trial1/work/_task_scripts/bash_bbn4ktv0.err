@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && qstat -x -f 7648318.imgt1 2>&1 | grep -E "job_state|Exit_status|resources_used.walltime" || echo "no history"'
+--> end executable <--

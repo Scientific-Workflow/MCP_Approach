@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && echo "=== full_snapshots ==="; ls -la /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/output/full_snapshots/ 2>&1; echo "=== step dirs ==="; ls -la /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/output/full_snapshots/*/ 2>&1 | head -40; echo "=== haloproperties ==="; ls -la /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/analysis/haloproperties/ 2>&1; ls -la /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/analysis/haloproperties/*/ 2>&1 | head -40'
+--> end executable <--

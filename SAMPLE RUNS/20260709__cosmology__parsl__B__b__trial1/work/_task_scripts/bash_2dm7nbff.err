@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && sleep 60 && qstat 7648318.imgt1 2>&1 || echo "qstat returned nonzero"'
+--> end executable <--

@@ -1,0 +1,95 @@
+=== full_snapshots ===
+total 5
+drwxrwx---+ 5 jacob.oh cels 4096 Jul  8 17:36 .
+drwxrwx---+ 7 jacob.oh cels 4096 Jun 23 10:30 ..
+drwxrwx---+ 2 jacob.oh cels 4096 Jul  8 17:25 step_205
+drwxrwx---+ 2 jacob.oh cels 4096 Jul  8 17:27 step_310
+drwxrwx---+ 2 jacob.oh cels 4096 Jul  8 17:36 step_624
+=== step dirs ===
+/lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/output/full_snapshots/step_205/:
+total 10835
+drwxrwx---+ 2 jacob.oh cels    4096 Jul  8 17:25 .
+drwxrwx---+ 5 jacob.oh cels    4096 Jul  8 17:36 ..
+-rw-r-----+ 1 jacob.oh cels    1824 Jul  9 14:10 m000p.full.mpicosmo.205
+-rw-r-----+ 1 jacob.oh cels 1505570 Jul  9 14:10 m000p.full.mpicosmo.205#0
+-rw-r-----+ 1 jacob.oh cels 1205858 Jul  9 14:10 m000p.full.mpicosmo.205#1
+-rw-r-----+ 1 jacob.oh cels 1584404 Jul  9 14:10 m000p.full.mpicosmo.205#2
+-rw-r-----+ 1 jacob.oh cels 1171628 Jul  9 14:10 m000p.full.mpicosmo.205#3
+-rw-r-----+ 1 jacob.oh cels 1418252 Jul  9 14:10 m000p.full.mpicosmo.205#4
+-rw-r-----+ 1 jacob.oh cels 1328918 Jul  9 14:10 m000p.full.mpicosmo.205#5
+-rw-r-----+ 1 jacob.oh cels 1535768 Jul  9 14:10 m000p.full.mpicosmo.205#6
+-rw-r-----+ 1 jacob.oh cels 1284482 Jul  9 14:10 m000p.full.mpicosmo.205#7
+
+/lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/output/full_snapshots/step_310/:
+total 10835
+drwxrwx---+ 2 jacob.oh cels    4096 Jul  8 17:27 .
+drwxrwx---+ 5 jacob.oh cels    4096 Jul  8 17:36 ..
+-rw-r-----+ 1 jacob.oh cels    1824 Jul  9 14:12 m000p.full.mpicosmo.310
+-rw-r-----+ 1 jacob.oh cels 1573652 Jul  9 14:12 m000p.full.mpicosmo.310#0
+-rw-r-----+ 1 jacob.oh cels 1119170 Jul  9 14:12 m000p.full.mpicosmo.310#1
+-rw-r-----+ 1 jacob.oh cels 1657106 Jul  9 14:12 m000p.full.mpicosmo.310#2
+-rw-r-----+ 1 jacob.oh cels 1097624 Jul  9 14:12 m000p.full.mpicosmo.310#3
+-rw-r-----+ 1 jacob.oh cels 1421528 Jul  9 14:12 m000p.full.mpicosmo.310#4
+-rw-r-----+ 1 jacob.oh cels 1303844 Jul  9 14:12 m000p.full.mpicosmo.310#5
+-rw-r-----+ 1 jacob.oh cels 1604732 Jul  9 14:12 m000p.full.mpicosmo.310#6
+-rw-r-----+ 1 jacob.oh cels 1257224 Jul  9 14:12 m000p.full.mpicosmo.310#7
+
+/lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/output/full_snapshots/step_624/:
+total 10835
+drwxrwx---+ 2 jacob.oh cels    4096 Jul  8 17:36 .
+drwxrwx---+ 5 jacob.oh cels    4096 Jul  8 17:36 ..
+-rw-r-----+ 1 jacob.oh cels    1824 Jul  9 14:21 m000p.full.mpicosmo.624
+-rw-r-----+ 1 jacob.oh cels 1715738 Jul  9 14:21 m000p.full.mpicosmo.624#0
+-rw-r-----+ 1 jacob.oh cels  949532 Jul  9 14:21 m000p.full.mpicosmo.624#1
+-rw-r-----+ 1 jacob.oh cels 1785458 Jul  9 14:21 m000p.full.mpicosmo.624#2
+-rw-r-----+ 1 jacob.oh cels  936932 Jul  9 14:21 m000p.full.mpicosmo.624#3
+-rw-r-----+ 1 jacob.oh cels 1376714 Jul  9 14:21 m000p.full.mpicosmo.624#4
+-rw-r-----+ 1 jacob.oh cels 1222112 Jul  9 14:21 m000p.full.mpicosmo.624#5
+-rw-r-----+ 1 jacob.oh cels 1828046 Jul  9 14:21 m000p.full.mpicosmo.624#6
+=== haloproperties ===
+total 5
+drwxrwx---+ 5 jacob.oh cels 4096 Jul  9 09:31 .
+drwxrwx---+ 7 jacob.oh cels 4096 Jul  9 09:20 ..
+drwxrwx---+ 2 jacob.oh cels 4096 Jul  9 09:20 step_205
+drwxrwx---+ 2 jacob.oh cels 4096 Jul  9 09:22 step_310
+drwxrwx---+ 2 jacob.oh cels 4096 Jul  9 09:31 step_624
+/lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/analysis/haloproperties/step_205/:
+total 307
+drwxrwx---+ 2 jacob.oh cels  4096 Jul  9 09:20 .
+drwxrwx---+ 5 jacob.oh cels  4096 Jul  9 09:31 ..
+-rw-r-----+ 1 jacob.oh cels  1824 Jul  9 14:10 m000p-205.haloproperties
+-rw-r-----+ 1 jacob.oh cels 33816 Jul  9 14:10 m000p-205.haloproperties#0
+-rw-r-----+ 1 jacob.oh cels 24884 Jul  9 14:10 m000p-205.haloproperties#1
+-rw-r-----+ 1 jacob.oh cels 36896 Jul  9 14:10 m000p-205.haloproperties#2
+-rw-r-----+ 1 jacob.oh cels 25500 Jul  9 14:10 m000p-205.haloproperties#3
+-rw-r-----+ 1 jacob.oh cels 31352 Jul  9 14:10 m000p-205.haloproperties#4
+-rw-r-----+ 1 jacob.oh cels 29504 Jul  9 14:10 m000p-205.haloproperties#5
+-rw-r-----+ 1 jacob.oh cels 33508 Jul  9 14:10 m000p-205.haloproperties#6
+-rw-r-----+ 1 jacob.oh cels 31660 Jul  9 14:10 m000p-205.haloproperties#7
+
+/lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/analysis/haloproperties/step_310/:
+total 387
+drwxrwx---+ 2 jacob.oh cels  4096 Jul  9 09:22 .
+drwxrwx---+ 5 jacob.oh cels  4096 Jul  9 09:31 ..
+-rw-r-----+ 1 jacob.oh cels  1824 Jul  9 14:12 m000p-310.haloproperties
+-rw-r-----+ 1 jacob.oh cels 47676 Jul  9 14:12 m000p-310.haloproperties#0
+-rw-r-----+ 1 jacob.oh cels 35356 Jul  9 14:12 m000p-310.haloproperties#1
+-rw-r-----+ 1 jacob.oh cels 46752 Jul  9 14:12 m000p-310.haloproperties#2
+-rw-r-----+ 1 jacob.oh cels 34124 Jul  9 14:12 m000p-310.haloproperties#3
+-rw-r-----+ 1 jacob.oh cels 39360 Jul  9 14:12 m000p-310.haloproperties#4
+-rw-r-----+ 1 jacob.oh cels 38436 Jul  9 14:12 m000p-310.haloproperties#5
+-rw-r-----+ 1 jacob.oh cels 46444 Jul  9 14:12 m000p-310.haloproperties#6
+-rw-r-----+ 1 jacob.oh cels 41824 Jul  9 14:12 m000p-310.haloproperties#7
+
+/lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/analysis/haloproperties/step_624/:
+total 435
+drwxrwx---+ 2 jacob.oh cels  4096 Jul  9 09:31 .
+drwxrwx---+ 5 jacob.oh cels  4096 Jul  9 09:31 ..
+-rw-r-----+ 1 jacob.oh cels  1824 Jul  9 14:21 m000p-624.haloproperties
+-rw-r-----+ 1 jacob.oh cels 59688 Jul  9 14:21 m000p-624.haloproperties#0
+-rw-r-----+ 1 jacob.oh cels 39360 Jul  9 14:21 m000p-624.haloproperties#1
+-rw-r-----+ 1 jacob.oh cels 50756 Jul  9 14:21 m000p-624.haloproperties#2
+-rw-r-----+ 1 jacob.oh cels 39976 Jul  9 14:21 m000p-624.haloproperties#3
+-rw-r-----+ 1 jacob.oh cels 48908 Jul  9 14:21 m000p-624.haloproperties#4
+-rw-r-----+ 1 jacob.oh cels 48292 Jul  9 14:21 m000p-624.haloproperties#5
+-rw-r-----+ 1 jacob.oh cels 55684 Jul  9 14:21 m000p-624.haloproperties#6

@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && echo "=== pwd/repo ===" && pwd && echo "=== hacc_tpm ===" && ls -la /lcrc/project/PEDAL/jacoboh/HACC/HACC_go/improv.cpu/mpi/bin/hacc_tpm && echo "=== GenericIOPrint locations ===" && ls -la /lcrc/project/PEDAL/jacoboh/HACC/HACC_go/improv.cpu/frontend/bin/GenericIOPrint 2>/dev/null; ls -la /lcrc/project/PEDAL/jacoboh/HACC/HACC_go/improv.cpu/mpi/bin/GenericIOPrint 2>/dev/null; echo "=== envfile ===" && ls -la /lcrc/project/PEDAL/jacoboh/HACC/HACC_go/env/bashrc.improv.cpu'
+--> end executable <--

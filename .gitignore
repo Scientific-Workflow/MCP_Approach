@@ -6,5 +6,6 @@ __pycache__/
 runs/
 venv3/
 wheelhouse/
-work/
+/work/
 OLD RUNS/
+SAMPLE RUNS/**/work/.parsl/
