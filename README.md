@@ -300,6 +300,44 @@ python agent_mcp.py \
   --goal "Reproduce this workflow using LAMMPS and OVITO"
 ```
 
+### Flag Matrix — Every Value You Can Pass on HPC
+
+| Flag | Required? | Values on HPC | Meaning |
+|---|---|---|---|
+| `--env` | yes, always `hpc` here | `hpc` | Loads `knowledge/lcrc`, enables PBS-aware MPI sizing |
+| `--engine` | no (default `parsl`) | `parsl` \| `pycompss` \| `adios` | Which MCP workflow-engine server to launch |
+| `--paper` | no, but needed to pick a paper | 1-based index into `Literature/` (e.g. `1`, `2`, `3`) or a direct PDF path | Which paper the agent reads |
+| `--image` | no | path to an image file | Optional figure/diagram to aid planning |
+| `--goal` | no, but should always be set | free text | Natural-language goal describing what to reproduce |
+| `--domain` | no | `molecular_nucleation` \| `cosmology` \| `eddy_uv` \| any free text \| `""` (default) | Label used in the archive folder name; also what you'll typically set to match the paper |
+| `--condition` | no (default `B`) | `A` (no skills) \| `B` (full multi-agent) \| `C` (single-agent) | Ablation condition — `B` is this repo's normal mode |
+| `--combination` | **yes** | `a` (PDF+Image+Desc) \| `b` (PDF+Desc) \| `c` (Image+Desc) \| `d` (Desc only) | Which planner inputs are actually used |
+| `--trial` | no (default `1`) | any integer | Distinguishes repeated runs of the same (paper, condition) pair |
+
+### Example Commands — One Per Engine
+
+```bash
+# Parsl engine, cosmology paper, full multi-agent (default condition B)
+python agent_mcp.py --env hpc --engine parsl \
+  --paper 1 --domain cosmology --combination b --trial 1 \
+  --goal "Reproduce the density-field analysis from this paper"
+
+# PyCOMPSs engine, molecular nucleation paper
+python agent_mcp.py --env hpc --engine pycompss \
+  --paper 2 --domain molecular_nucleation --combination b --trial 1 \
+  --goal "Reproduce this workflow using LAMMPS and OVITO"
+
+# ADIOS2 engine, eddy_uv paper, passing a figure image alongside the PDF
+python agent_mcp.py --env hpc --engine adios \
+  --paper 3 --image Literature/eddy_uv_diagram.png --domain eddy_uv --combination a --trial 1 \
+  --goal "Reproduce the eddy streamfunction visualization from this paper"
+
+# Same run again as a second trial, with the no-skills ablation condition
+python agent_mcp.py --env hpc --engine parsl \
+  --paper 1 --domain cosmology --condition A --combination b --trial 2 \
+  --goal "Reproduce the density-field analysis from this paper"
+```
+
 With `--env hpc`, the `knowledge/lcrc` skill is loaded. It reads these PBS variables to
 size MPI launches automatically:
 
