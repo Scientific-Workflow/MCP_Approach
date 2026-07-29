@@ -80,13 +80,12 @@ def _check_adios2() -> bool:
 
 
 # __ Real ADIOS2 Usage Verification ____________________________________________
-# Unlike PyCOMPSs's @task wrapping, the server can't structurally force ADIOS2
-# usage for arbitrary submit_task code -- it's an I/O library, not a task
-# scheduler, so there's no single call-site to wrap. This is the server-side
-# source of truth for whether submitted code actually called a real API, as
-# opposed to just having `adios2` importable. The "engine" field below is what
-# the explorer's trace classifier (mcp_explorer.py) reads -- it no longer does
-# its own content scan, this is now the single place that logic lives.
+# unlike pycompss's @task wrapping, we can't structurally force ADIOS2 usage for
+# arbitrary submit_task code, it's an I/O library not a task scheduler, so there's
+# no single call-site to wrap. this is the server-side source of truth for whether
+# submitted code actually called a real API vs just having adios2 importable.
+# the "engine" field below is what mcp_explorer.py's trace classifier reads now,
+# the content scan used to live client-side and moved here
 
 _ADIOS_API_MARKERS = (
     "adios2.open(", ".declare_io(", ".set_engine(", "adios2.ADIOS(",
@@ -399,9 +398,8 @@ def submit_task(
     # Resolve /app/ path aliases in user code so os.chdir("/app/work/run0") etc. work
     resolved_code = _resolve_paths(python_code)
 
-    # Classify on the code as actually submitted (pre-resolution -- path
-    # substitution can't change whether an API marker is present) before
-    # wrapping, so a fallback/unused verdict is independent of the wrapper.
+    # classify on the code as submitted, before path resolution and wrapping,
+    # so the fallback/unused verdict is independent of the wrapper
     engine = _adios_engine_state(python_code)
 
     wrapped_script = _wrap_as_adios_task(resolved_code)
@@ -657,10 +655,9 @@ def run_lammps(
     }
 
     if use_mpi:
-        # The pip-installed `lammps` wheel's bundled `lmp` binary cannot load on this
-        # cluster's kernel (ELF segment-layout mismatch — see parsl_server.py for the
-        # dmesg evidence) regardless of MPI runtime. Use the cluster-provided module
-        # (gcc 13.2.0 + OpenMPI 5.0.6) instead, which is built natively for this kernel.
+        # the pip lammps wheel's bundled lmp binary won't load on this cluster's kernel
+        # (same elf segment-layout mismatch as parsl_server.py) no matter the MPI
+        # runtime, so use the cluster module (gcc 13.2.0 + OpenMPI 5.0.6) instead
         cmd = (
             f"module load lammps/22Jul2025 >/dev/null 2>&1 && "
             f"cd {_work} && "
@@ -681,7 +678,7 @@ lmp.close()
 
     exit_code = result["exit_code"]
     frames_written = _glob.glob(os.path.join(frames_dir, "*.lammpstrj")) if os.path.isdir(frames_dir) else []
-    # exit 11 = SIGSEGV on lmp cleanup — output was already written before crash
+    # exit 11 = SIGSEGV on lmp cleanup, but output was already written before it crashed
     if exit_code == 11 and frames_written:
         status = "completed"
         note = f"lmp exited 11 (SIGSEGV cleanup crash) but {len(frames_written)} trajectory frames were written — treating as success"

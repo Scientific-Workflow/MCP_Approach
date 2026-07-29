@@ -4,7 +4,7 @@ description: >
   Complete behavioral spec for the orchestrator agent (MCP Approach). Covers role, agent
   roster, routing rules, revision thresholds, two-phase installer flow, state fields,
   and how to request use-case or system sub-skills. This IS the orchestrator's operating
-  manual -- the system prompt in code is just the JSON schema.
+  manual the system prompt in code is just the JSON schema.
 ---
 
 # Orchestrator Agent -- Base Skill (MCP Approach)

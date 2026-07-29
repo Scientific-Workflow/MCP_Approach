@@ -56,26 +56,6 @@ def _git_commit() -> Optional[str]:
         return None
 
 
-def extract_usage(response: Any) -> dict:
-    """Pull token counts out of a LangChain chat response, if present."""
-    usage = getattr(response, "usage_metadata", None)
-    if usage:
-        return {
-            "input_tokens": usage.get("input_tokens", 0),
-            "output_tokens": usage.get("output_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-        }
-    meta = getattr(response, "response_metadata", None) or {}
-    tu = meta.get("token_usage") or meta.get("usage")
-    if tu:
-        return {
-            "input_tokens": tu.get("prompt_tokens", 0),
-            "output_tokens": tu.get("completion_tokens", 0),
-            "total_tokens": tu.get("total_tokens", 0),
-        }
-    return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-
-
 def message_to_dict(m: Any) -> dict:
     """Convert a LangChain BaseMessage into a JSON-safe {"role", "content"} dict.
 

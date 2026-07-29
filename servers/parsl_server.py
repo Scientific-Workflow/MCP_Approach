@@ -30,9 +30,8 @@ import tempfile
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
-# Parsl is optional. When installed, task execution is routed through a real
-# Parsl DataFlowKernel (@python_app scheduling). When absent, the server falls
-# back to direct subprocess execution -- identical results, no Parsl scheduling.
+# parsl is optional. if installed, tasks route through a real Parsl DataFlowKernel
+# (@python_app). if not, falls back to direct subprocess, same results either way
 try:
     import parsl
     from parsl import python_app, bash_app
@@ -50,7 +49,7 @@ mcp = FastMCP(
 
 # __ Configuration _____________________________________________________________
 
-# Repo root -- used as base for relative paths
+# repo root, base for relative paths
 REPO_ROOT = os.environ.get(
     "REPO_ROOT",
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -62,10 +61,9 @@ REPO_ROOT = os.environ.get(
 # If not set, uses the same Python as the server.
 VENV_PYTHON = os.environ.get("VENV_PYTHON", sys.executable)
 
-# Parsl's HighThroughputExecutor launches its interchange subprocess by bare name
-# ("interchange.py"), resolved via PATH -- not via VENV_PYTHON's directory. Without
-# this, parsl.load() fails with FileNotFoundError and _ensure_parsl() silently falls
-# back to plain subprocess execution (no real Parsl scheduling, no error surfaced).
+# parsl's HighThroughputExecutor launches interchange.py by bare name off PATH,
+# not off VENV_PYTHON's directory. without this parsl.load() fails to find it and
+# _ensure_parsl() quietly falls back to plain subprocess with no error surfaced
 _venv_bin = os.path.dirname(VENV_PYTHON)
 if _venv_bin and _venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
     os.environ["PATH"] = _venv_bin + os.pathsep + os.environ.get("PATH", "")
@@ -163,8 +161,7 @@ def _build_parsl_config():
     return Config(
         executors=[HighThroughputExecutor(**executor_kwargs)],
         run_dir=os.path.join(DEFAULT_WORK_DIR, ".parsl"),  # keep Parsl logs out of repo root
-        # Default (True) writes DEBUG-level parsl.log -- per-5s scaling-strategy
-        # chatter etc. False disables Parsl's automatic file logging entirely.
+        # default (True) writes a noisy DEBUG-level parsl.log, turning it off here
         initialize_logging=False,
     )
 
@@ -359,7 +356,7 @@ def _run_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout: int 
             result["used_parsl"] = True
             return result
         except Exception as e:
-            # Parsl execution failed -- fall back so the workflow still completes.
+            # parsl exec failed, fall back so the workflow still completes
             print(f"[parsl_server] Parsl exec failed ({e}); using direct subprocess",
                   file=sys.stderr)
     result = _run_command_local(cmd, work_dir, timeout)
@@ -403,11 +400,9 @@ def _run_bash_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout:
             try:
                 with open(stderr_path) as f:
                     err = f.read()
-                # Parsl's own remote_side_bash_executor prints a
-                # "--> executable follows <-- ... --> end executable <--" banner
-                # to stderr before the command runs (see parsl/app/bash.py) --
-                # strip it so callers see the command's own stderr only, matching
-                # the plain-subprocess path's behavior.
+                # parsl's remote_side_bash_executor prints its own
+                # "--> executable follows <-- ... --> end executable <--" banner to
+                # stderr first, strip it so this matches the plain-subprocess path
                 if _stderr_banner_end in err:
                     err = err.split(_stderr_banner_end, 1)[1]
                 err = err.strip()
@@ -427,7 +422,7 @@ def _run_bash_command(cmd: list[str], work_dir: str = DEFAULT_WORK_DIR, timeout:
             return {"exit_code": -1, "stdout": "", "stderr": f"Command timed out after {timeout}s",
                     "used_parsl": True}
         except Exception as e:
-            # Parsl execution failed -- fall back so the workflow still completes.
+            # parsl exec failed, fall back so the workflow still completes
             print(f"[parsl_server] Parsl bash_app exec failed ({e}); using direct subprocess",
                   file=sys.stderr)
 
@@ -852,7 +847,7 @@ def submit_mpi_task(
     elif launcher == "mpirun":
         full_cmd = f"mpirun -np {ranks} {command}"
     else:
-        # No MPI launcher found -- run the command directly (single process)
+        # no MPI launcher found, just run it directly as a single process
         full_cmd = command
 
     _tasks[task_id] = {
@@ -929,15 +924,11 @@ def run_lammps(
     }
 
     if use_mpi:
-        # The pip-installed `lammps` wheel's bundled `lmp` binary cannot load on this
-        # cluster's kernel (confirmed via dmesg: "Uhuuh, elf segment at ... requested
-        # but the memory is mapped already" — an ELF segment-layout mismatch between
-        # the wheel's build toolchain and this kernel) regardless of which MPI runtime
-        # it's paired with. The cluster-provided module (gcc 13.2.0 + OpenMPI 5.0.6)
-        # is built natively for this kernel and runs correctly.
-        # `-l` (login shell) is required so the `module` command is defined; it also
-        # unsets the Intel-MPI singleton vars (PMI_SIZE etc.) which TASK_ENV sets for
-        # the Python-API fallback below but which conflict with a real mpirun launch.
+        # the pip lammps wheel's bundled lmp binary won't load on this cluster's kernel,
+        # dmesg shows an elf segment-layout mismatch no matter which MPI it's paired with.
+        # the cluster module (gcc 13.2.0 + OpenMPI 5.0.6) is built for this kernel and works.
+        # need -l so `module` is defined, and it unsets the Intel-MPI singleton vars
+        # TASK_ENV sets for the python-API fallback since those break a real mpirun launch
         cmd = (
             f"module load lammps/22Jul2025 >/dev/null 2>&1 && "
             f"cd {_work} && "
@@ -958,7 +949,7 @@ lmp.close()
 
     exit_code = result["exit_code"]
     frames_written = _glob.glob(os.path.join(frames_dir, "*.lammpstrj")) if os.path.isdir(frames_dir) else []
-    # exit 11 = SIGSEGV on lmp cleanup — output was already written before crash
+    # exit 11 = SIGSEGV on lmp cleanup, but output was already written before it crashed
     if exit_code == 11 and frames_written:
         status = "completed"
         note = f"lmp exited 11 (SIGSEGV cleanup crash) but {len(frames_written)} trajectory frames were written — treating as success"

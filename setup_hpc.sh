@@ -27,8 +27,8 @@ IMPROV_FABRIC="/gpfs/fs1/soft/improv/software/custom-built/intel-oneapi-toolkit/
 
 export LD_LIBRARY_PATH="${SWING_MPI}:${IMPROV_MPI}:${IMPROV_FABRIC}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
-# Point the MCP server launcher at the project venv that has lammps, ovito, etc.
-# mcp_tools.py uses this to launch parsl_server.py with the right interpreter.
+# points at the project venv with lammps, ovito, etc in it.
+# the servers pick this up straight from the environment to launch with the right interpreter
 export VENV_PYTHON="${SCRIPT_DIR}/venv3/bin/python3"
 
 echo "LD_LIBRARY_PATH set for Intel MPI (Swing + Improv)"

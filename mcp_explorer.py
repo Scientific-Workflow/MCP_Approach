@@ -99,9 +99,8 @@ def _read_skill(rel_path: str, agent_name: str = "explorer", enabled: bool = Tru
     return ""
 
 
-# Set once per explorer run (see explorer()/_explorer_async) so the module-level
-# `load_skill` tool -- which the LLM calls with no access to AgentState -- can see
-# the current ablation condition.
+# set once per explorer run, lets the module-level load_skill tool see the
+# current condition even though it has no access to AgentState when the LLM calls it
 _current_condition: str = "B"
 
 # Mirrors agent_mcp.ENV_NOTES. Duplicated rather than imported to avoid a circular
@@ -330,8 +329,8 @@ _KNOWLEDGE_SKILLS = {
     "hpc":   "knowledge/lcrc",
 }
 
-# Engine-specific skills, force-loaded into the explorer's system prompt (see
-# _explorer_async) rather than left to load_skill -- (systems/<engine>, knowledge/<ENGINE>).
+# engine-specific skills, force-loaded into the system prompt in _explorer_async
+# instead of leaving it to load_skill (systems/<engine>, knowledge/<ENGINE>)
 _ENGINE_SKILLS = {
     "parsl":    ("systems/parsl",    "knowledge/PARSL"),
     "pycompss": ("systems/pycompss", "knowledge/PyCOMPSs"),
@@ -397,9 +396,8 @@ def load_skill(name: str) -> str:
     """
     if name not in _KNOWLEDGE_SKILLS:
         return f"Unknown skill '{name}'. Use 'local' or 'hpc'."
-    # condition B/C: read the real curated skill file, unchanged.
-    # condition A: the skill file is suppressed (never touched) -- return the same
-    # lean ENV_NOTES substitute used by the orchestrator/planner in this condition.
+    # B/C read the real skill file. A never touches it, gets the same lean
+    # ENV_NOTES substitute the orchestrator/planner use in that condition
     enabled = _current_condition != "A"
     content = _read_skill(_KNOWLEDGE_SKILLS[name], enabled=enabled)
     return content or ENV_NOTES.get(name, ENV_NOTES["local"])
@@ -414,9 +412,8 @@ EXPLORER_TOOLS = [
     get_resources, submit_mpi_task, run_lammps, load_skill,
 ]
 
-# Engine-specific additions -- adios_server.py is the only server that
-# implements write_bp/read_bp, so there's no reason to show these to the LLM
-# for parsl/pycompss runs.
+# only adios_server.py implements write_bp/read_bp, no point showing these
+# to the model on parsl/pycompss runs
 _ENGINE_EXTRA_TOOLS = {
     "adios": [write_bp, read_bp],
 }
@@ -609,8 +606,8 @@ async def _explorer_async(state: dict, engine: str) -> dict:
             context_parts.append("Tasks to execute:\n" +
                                  "\n".join(f"  {i+1}. {t}" for i, t in enumerate(tasks)))
 
-        # Load skill files -- condition A never touches skills/ at all, not even to list
-        # the use_cases/ directory, so the whole auto-detection block is skipped outright.
+        # condition A never touches skills/ at all, not even to list use_cases/,
+        # so the whole auto-detection block below just gets skipped
         _enabled = state.get("condition", "B") != "A"
         _base_skill = _read_skill("agents/explorer", enabled=_enabled)
         _uc_skill = ""
@@ -618,10 +615,9 @@ async def _explorer_async(state: dict, engine: str) -> dict:
             _uc_dir = os.path.join(_SKILLS_ROOT, "use_cases")
             _domain_lower = (state.get("domain") or "").strip().lower()
 
-            # Preferred: deterministic lookup from --domain, set explicitly by the
-            # caller -- not inferred. Bidirectional substring match (not equality)
-            # because domain labels aren't guaranteed to match folder names exactly
-            # (e.g. --domain MOLECULAR vs the use_cases/molecular_nucleation/ folder).
+            # prefer the explicit --domain flag over guessing. substring match both
+            # ways since domain labels don't always match the folder name exactly
+            # (--domain MOLECULAR vs the use_cases/molecular_nucleation/ folder)
             if _domain_lower and os.path.isdir(_uc_dir):
                 for uc_name in os.listdir(_uc_dir):
                     uc_lower = uc_name.lower()
@@ -632,12 +628,9 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                             console.print(f"[dim cyan][explorer] loaded use case skill via --domain: {uc_name}[/dim cyan]")
                         break
 
-            # Fallback: scan all use_cases/*/explorer.SKILL.md files and match if
-            # any stack_decision package name appears in the skill's description.
-            # Only used when --domain wasn't passed or didn't match a folder --
-            # this heuristic is unreliable (package names rarely appear in a
-            # domain skill's own description) and shouldn't be relied on when a
-            # deterministic signal is available.
+            # fallback if --domain wasn't passed or didn't match: scan every
+            # use_cases/*/explorer.SKILL.md and match on stack_decision package names.
+            # shaky heuristic, package names rarely show up in a skill's own description
             if not _uc_skill:
                 _stack_lower = [p.lower() for p in stack_decision]
                 if os.path.isdir(_uc_dir):
@@ -651,12 +644,10 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                             console.print(f"[dim cyan][explorer] loaded use case skill via stack match: {uc_name}[/dim cyan]")
                             break
 
-        # Force-load engine-specific skills -- deterministic, not an LLM-discretionary
-        # tool call, since relying on the model to decide to load_skill("adios") is
-        # exactly how it ends up importing a package without ever using its real API.
-        # systems/<engine> (short, project-specific "what submit_task already does for
-        # you") is loaded before knowledge/<ENGINE> (the long general API reference) so
-        # the operational rules land first.
+        # force-load the engine skills instead of leaving it to the model to call
+        # load_skill("adios"), that's exactly how you get imports with no real API use.
+        # systems/<engine> loads before knowledge/<ENGINE> so the operational rules
+        # land before the long general reference
         _sys_skill_path, _know_skill_path = _ENGINE_SKILLS.get(engine, (None, None))
         _engine_skill = ""
         if _sys_skill_path:
@@ -695,7 +686,9 @@ async def _explorer_async(state: dict, engine: str) -> dict:
 
         # Initialize LLM with tool binding
         llm = ChatOpenAI(
-            model=os.getenv("CODER_MODEL_NAME", os.getenv("MODEL_NAME", "claudesonnet46")),
+            model=os.getenv("CODER_MODEL_NAME", os.getenv("MODEL_NAME")),
+            streaming=True,
+            stream_usage=True,
         )
         llm_with_tools = llm.bind_tools(_tools_for_engine(engine))
 
@@ -771,9 +764,9 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                         border_style="yellow",
                     ))
 
-                # load_skill is client-side (reads local skill files via _read_skill) --
-                # no MCP server implements it as a tool, so it must run locally rather
-                # than being forwarded to session.call_tool like every other tool below.
+                # load_skill is client side, reads skill files directly via _read_skill.
+                # no server implements it as a tool so it can't go through session.call_tool
+                # like everything else below
                 if tool_name == "load_skill":
                     tool_result = load_skill.invoke(tool_args)
                     console.print(f"[green][explorer] {tool_name} -> loaded locally[/green]")
@@ -824,13 +817,8 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                 display_status = "?"
                 try:
                     parsed = json.loads(tool_result)
-                    # A tool call succeeded if ANY of these are true:
-                    # - "status" is "completed" or "success"
-                    # - "exit_code" is 0
-                    # - "installed" is True (check_package)
-                    # - "files" key exists (list_files)
-                    # - "content" key exists (read_file)
-                    # - "error" key is absent
+                    # counts as success: status completed/success, exit_code 0, installed True,
+                    # or a files/content key present. no error key either way
                     status_val = parsed.get("status")
                     exit_code = parsed.get("exit_code")
                     has_error = "error" in parsed
@@ -866,12 +854,12 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                         tool_succeeded = True
                         display_status = f"{parsed.get('total', '?')} tasks"
                     elif "nnodes" in parsed:
-                        # get_resources response — no status field, presence of nnodes = success
+                        # get_resources has no status field, nnodes present just means it worked
                         tool_succeeded = True
                         launcher = parsed.get("launcher") or "none"
                         display_status = f"nodes={parsed['nnodes']} ranks={parsed.get('ntasks',1)} launcher={launcher}"
                     else:
-                        # Unknown response shape — treat as failure so errors are never silently swallowed
+                        # unknown shape, call it a failure so nothing gets silently swallowed
                         tool_succeeded = False
                         display_status = "unknown response"
                 except (json.JSONDecodeError, AttributeError):
@@ -927,7 +915,7 @@ async def _explorer_async(state: dict, engine: str) -> dict:
                         f"(engine_backend={engine_backend})[/bold red]"
                     )
 
-                # Log to trace (full result, not truncated -- needed for debugging failed runs)
+                # log the full result to trace, not truncated, need it for debugging failed runs
                 tracer.log_tool_call("explorer", tool_name, tool_args,
                                      tool_result, tool_succeeded, iteration=iteration + 1,
                                      engine_backend=engine_backend, engine_verified=engine_verified)
@@ -970,8 +958,8 @@ async def _explorer_async(state: dict, engine: str) -> dict:
         )
         console.print(f"[dim cyan][explorer] {summary}[/dim cyan]")
 
-        # Record what was actually produced -- supports tier-1/tier-3 scoring
-        # directly from the trace without re-deriving it from tool-call text.
+        # record what actually got produced, so scoring can read straight from the
+        # trace instead of re-deriving it from tool-call text
         work_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "work")
         artifacts = []
         if os.path.isdir(work_dir):

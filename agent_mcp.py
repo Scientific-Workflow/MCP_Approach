@@ -47,11 +47,11 @@ load_dotenv()
 
 console = Console()
 
-_run_log_path: str = "" # path for logging run-level events in JSONL format; only in orchestrator to record routing decisions
+_run_log_path: str = ""  # jsonl log of routing decisions, orchestrator writes to this
 
 
 # __ LLM ______________________________________________________________________
-model = ChatOpenAI(model=os.getenv("MODEL_NAME", "claudesonnet46"))
+model = ChatOpenAI(model=os.getenv("MODEL_NAME"), streaming=True, stream_usage=True)
 
 
 # __ Agent State _______________________________________________________________
@@ -77,8 +77,8 @@ class AgentState(TypedDict):
     engine:                str              # workflow engine: "parsl", "pycompss", etc.
     env:                   str              # execution environment: "local" or "hpc"
     condition:              str             # ablation condition: "A" (no-skills), "B" (full), "C" (single-agent)
-    domain:                str              # paper domain label, e.g. "cosmology" -- drives deterministic
-                                             # use_cases/<domain>/* skill lookup instead of keyword-matching
+    domain:                str              # paper domain label, e.g. "cosmology"
+                                             # used to look up use_cases/<domain>/* directly instead of keyword matching
 
 
 # __ Pydantic Schemas __________________________________________________________
@@ -114,10 +114,9 @@ Return ONLY a valid JSON object with exactly these keys:
 \
 """
 
-# __ Condition-A (no-skills) prompt -- separate, hand-written, never derived from the skill files __
-# Per the eval plan: condition A's system prompt contains role definitions, tool/agent catalogs,
-# and task framing only -- no procedural heuristics. This is an isolated constant on purpose
-# (see memory: add new isolated files/constants per use case rather than editing shared ones).
+# condition A prompt, written separate from the skill files on purpose.
+# just roles/tools/task info, no strategy tips baked in like B and C get.
+# keeping it its own thing instead of folding into the shared prompts
 ORCHESTRATOR_SYSTEM_PROMPT_NO_SKILLS = """\
 You are the supervisor orchestrator for a scientific workflow reproduction system. You coordinate
 specialized agents to reproduce a computational workflow from a research paper in a local venv
@@ -197,8 +196,7 @@ HANDLING ORCHESTRATOR FEEDBACK:
 If the input ends with "Orchestrator feedback", fix every issue raised before returning.\
 """
 
-# __ Condition-A (no-skills) prompt -- separate, hand-written, never derived from the skill files __
-# Same isolation rule as ORCHESTRATOR_SYSTEM_PROMPT_NO_SKILLS above.
+# condition A version of the planner prompt, same deal as the orchestrator one above
 PLANNER_PROMPT_NO_SKILLS = """\
 You are a scientific workflow analyst. Given the full text of a research paper and a goal, extract
 everything needed to reproduce the computational workflow described in the paper.
@@ -242,14 +240,12 @@ If the input ends with "Orchestrator feedback", fix every issue raised before re
 
 
 # __ Project layout (injected into context) ____________________________________
-######################################################################## Project layout -- this is injected into the system prompt for all agents, so they understand where to read/write files and how the repo maps to runtime paths. Update as needed for your project. ################################################################
 
 PROJECT_LAYOUT = """\
 Repo directory tree -- the repo root is mapped to /app/ at runtime:
 
 /app/                                  <- repo root
 +-- agent_mcp.py                       <- orchestrator/planner/installer + graph
-+-- mcp_tools.py
 +-- mcp_explorer.py                    <- explorer agent (ReAct loop, MCP client)
 +-- servers/                           <- MCP server backends, one per workflow engine
 |   +-- parsl_server.py
@@ -308,7 +304,6 @@ def _invoke_structured(llm, schema, messages, agent_name, retries=5):
 
 
 # __ Skill file helpers ________________________________________________________
-############################################################################# SKILL FILE MANAGEMENT: read .SKILL.md files for orchestrator and planner, with support for sub-skill requests #################################
 
 _SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
 
@@ -335,11 +330,8 @@ _ENV_KNOWLEDGE = {
 }
 
 # __ Condition-A substitute for env knowledge ___________________________________
-# B/C still load the real knowledge/local|lcrc skill file via _read_skill, unchanged.
-# A withholds that curated file but still gets these few lean, undiscoverable facts
-# (not technique -- just "what machine is this") so it isn't crippled by a different,
-# unrelated handicap. See knowledge/local.SKILL.md / knowledge/lcrc.SKILL.md for the
-# full curated version this is deliberately a stripped-down stand-in for.
+# B/C load the real knowledge/local|lcrc skill file, unchanged. A doesn't get that
+# file, just these few bare facts about the machine, so it's not permanently stuck.
 ENV_NOTES = {
     "local": (
         "Environment: a single local machine, no job scheduler. No PBS/LSF, no multi-node "
@@ -361,8 +353,7 @@ def _env_knowledge(env: str, agent_name: str, enabled: bool = True) -> str:
     skill_key = _ENV_KNOWLEDGE.get(env, "knowledge/local")
     if enabled:
         return _read_skill(skill_key, agent_name, enabled=True)
-    # condition A: don't touch the filesystem at all -- _read_skill(enabled=False) already
-    # logs the suppression without any os.path/open call.
+    # condition A: no filesystem touch, _read_skill(enabled=False) just logs it and bails
     _read_skill(skill_key, agent_name, enabled=False)
     return ENV_NOTES.get(env, ENV_NOTES["local"])
 
@@ -389,7 +380,7 @@ def _list_skills(folder: str) -> list:
 
 # __ Nodes _____________________________________________________________________
 
-############################################################################# ORCHESTRATOR ##############################################################
+# __ Orchestrator _______________________________________________________________
 
 def orchestrator(state: AgentState) -> dict:
     console.print("\n[dim cyan][orchestrator] reviewing state...[/dim cyan]")
@@ -436,9 +427,8 @@ def orchestrator(state: AgentState) -> dict:
         for entry in log[-5:]:
             status_str = "OK" if entry.get("succeeded", False) else "FAILED"
             parts.append(f"  [{entry['tool']}] {status_str} - {entry.get('result', '')[:200]}")
-        # engine_verified is set by mcp_explorer.py's _classify_engine_usage -- False
-        # means a submit_task/submit_shell_task/submit_mpi_task call didn't demonstrably
-        # exercise the real workflow engine (see orchestrator skill for what to do about it).
+        # engine_verified comes from mcp_explorer.py's _classify_engine_usage. False means
+        # a submit_task/submit_shell_task/submit_mpi_task call didn't actually hit the real engine
         unverified = [e for e in log if e.get("engine_verified") is False]
         if unverified:
             parts.append(
@@ -452,10 +442,8 @@ def orchestrator(state: AgentState) -> dict:
                 )
             )
 
-    # Build system prompt: base skill + env knowledge + available skill index + core prompt.
-    # condition A (no-skills): _base comes back empty (suppressed) -> fall back to the
-    # separate, hand-written ORCHESTRATOR_SYSTEM_PROMPT_NO_SKILLS instead of the bare JSON-schema
-    # stub. _env_knowledge still gives condition A a lean substitute rather than nothing.
+    # system prompt = base skill + env knowledge + skill index + core prompt.
+    # condition A: _base comes back empty, so fall back to ORCHESTRATOR_SYSTEM_PROMPT_NO_SKILLS
     _enabled = state.get("condition", "B") != "A"
     _base = _read_skill("agents/orchestrator", "orchestrator", enabled=_enabled)
     _env_kn = _env_knowledge(state.get("env", "local"), "orchestrator", enabled=_enabled)
@@ -498,7 +486,7 @@ def orchestrator(state: AgentState) -> dict:
         log = state.get("exploration_log", [])
         successes = sum(1 for e in log if e.get("succeeded", False))
         if successes > 0 and result.next == "explorer":
-            # Explorer already ran and produced some results -- check if re-run is justified
+            # explorer already ran and got results, need a good reason to run it again
             explorer_revs = state.get("explorer_revisions", 0)
             if explorer_revs >= 1:
                 console.print("[dim yellow][orchestrator] explorer already revised once with results -- ending[/dim yellow]")
@@ -549,7 +537,7 @@ def orchestrator(state: AgentState) -> dict:
     return state_update
 
 
-################################################################################## PLANNER ####################################################################################
+# __ Planner ____________________________________________________________________
 def planner(state: AgentState) -> dict:
     try:
         console.print("\n[dim cyan][planner] reading PDF...[/dim cyan]")
@@ -564,9 +552,8 @@ def planner(state: AgentState) -> dict:
         feedback_section = (f"\n\nOrchestrator feedback -- address these issues before returning:\n{feedback}"
                             if feedback else "")
 
-        # Build system prompt: base skill + env knowledge + available skill index + core prompt.
-        # condition A (no-skills): _base comes back empty (suppressed) -> fall back to the
-        # separate PLANNER_PROMPT_NO_SKILLS instead of the bare JSON-schema stub.
+        # system prompt = base skill + env knowledge + skill index + core prompt.
+        # condition A: _base comes back empty, so fall back to PLANNER_PROMPT_NO_SKILLS
         _enabled = state.get("condition", "B") != "A"
         _base = _read_skill("agents/planner", "planner", enabled=_enabled)
         _env_kn = _env_knowledge(state.get("env", "local"), "planner", enabled=_enabled)
@@ -586,7 +573,7 @@ def planner(state: AgentState) -> dict:
                          "\n".join(f"  - {f}" for f in _data_files)) if _data_files else ""
         _human = f"Goal: {state['goal']}{_data_section}\n\nPaper:\n{pdf_text}{feedback_section}"
 
-        # Build human message -- multimodal if an image was provided
+        # multimodal message if an image got passed in
         if state.get("image_path"):
             console.print("\n[dim cyan][planner] loading image...[/dim cyan]")
             with open(state["image_path"], "rb") as _f:
@@ -617,9 +604,8 @@ def planner(state: AgentState) -> dict:
                     _human_msg,
                 ], "planner")
 
-        # ADIOS2 is the data-I/O layer for this engine -- don't leave it to LLM judgment
-        # whether to request it. Without it, every task silently falls back to numpy I/O
-        # (engine="adios2-fallback") with no real ADIOS2 transport ever exercised.
+        # force adios2 into the stack for this engine, don't leave it up to the model.
+        # without it every task just falls back to numpy I/O and adios2 never actually runs
         if state.get("engine") == "adios" and "adios2" not in result.stack_decision:
             result.stack_decision.append("adios2")
 
@@ -654,7 +640,7 @@ def planner(state: AgentState) -> dict:
         console.print(f"[red][planner] ERROR: {e}[/red]")
         raise
 
-################################################################################################### INSTALLER ##############################################################
+# __ Installer __________________________________________________________________
 
 def installer(state: AgentState) -> dict:
     import sys
@@ -665,7 +651,7 @@ def installer(state: AgentState) -> dict:
         requirements_path = os.path.join(build_dir, "requirements.txt")
 
         if state.get("requirements_approved"):
-            # __ Phase 2: requirements approved -- pip install into the current venv __
+            # __ Phase 2: approved, pip install into the venv __
             with open(requirements_path) as f:
                 packages = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
 
@@ -749,7 +735,6 @@ def installer(state: AgentState) -> dict:
         raise
 
 # __ Graph _____________________________________________________________________
-####################################################################################### LangGraph Nodes #######################################################################################################
 
 def route_orchestrator(state: AgentState) -> str:
     return state["next"]
@@ -779,7 +764,6 @@ app = graph.compile()
 
 
 # __ Run _______________________________________________________________________
-######################################################################### Console Terminal CLI DISPLAY AND RUN LOGGING ################################################################
 
 if __name__ == "__main__":
     import argparse
@@ -993,7 +977,7 @@ if __name__ == "__main__":
     console.print(f"  Tool calls: {summary['tool_calls']} ({summary['tool_successes']} succeeded)")
     console.print(f"  Total time: {summary['total_duration_s']}s")
 
-################################################################### TOKEN USAGE SUMMARY (CHECK runs folder: xxxxxxxx_trace.json) ##################################################################)
+    # token usage summary, full numbers are in runs/xxxxxxxx_trace.json
     # Print token usage
     total_in = summary.get('total_input_tokens', 0)
     total_out = summary.get('total_output_tokens', 0)
