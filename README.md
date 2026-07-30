@@ -3,8 +3,7 @@
 ## What This Project Is
 
 This is an agentic system that handles end-to-end execution of computational scientific workflows described
-by the user, **end to end and autonomously**. A pipeline of LLM agents reads
-the paper, decides what needs to be built, installs the required packages, and then
+by the user, **end to end and autonomously**. A pipeline of LLM agents parses user input, decides what needs to be built, installs the required packages, and then
 executes every step of the workflow itself — running simulations, doing analysis,
 generating plots/renders — using real tool calls against a real workflow engine.
 
