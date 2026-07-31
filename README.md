@@ -32,30 +32,40 @@ four roles into a single agent ("Condition C") — everything below about the wo
 engine, MCP servers, environment setup, and HPC execution applies identically there;
 only the agent-layer role split differs.
 
-#########################################
-INPUT TYPES:
-Images:
-  - Workflow design images/sketches of the user-defined workflow.
-Description:
+### Input Types
 
+Every run is built from up to four kinds of input. **Description is the only one every
+run needs** — Paper and Images are optional, gated by the required `--combination` flag
+(`a`=PDF+Image+Desc, `b`=PDF+Desc, `c`=Image+Desc, `d`=Desc only — see the
+[Flag Matrix](#flag-matrix--every-value-you-can-pass-on-hpc) below); Config/Data is
+always optional regardless of `--combination`.
 
-Molecular: 
-	I would like to have a 2-task workflow consisting of one producer and one consumer task. The producer runs a LAMMPS molecular dynamics simulation of crystallization and generates trajectory data. The consumer runs OVITO, which reads the resulting trajectory dump file, identifies diamond structures using the diamond structure identification modifier, renders each frame using the TachyonRenderer, and saves the output as PNG images. 
+**Images:**
+- Workflow design images/sketches of the user-defined workflow.
+- Optional — pass a path with `--image`, or pick one interactively from `images/` at
+  startup (enter `0` to skip). Only used when `--combination` is `a` or `c`.
 
+**Description:**
+- Free-text goal describing the workflow to reproduce, passed with `--goal "..."`.
+- The one input every run needs, regardless of `--combination`.
 
-Cosmology:
-  Submit /lcrc/project/PEDAL/jacoboh/HACC/SampleRun_go/subme.pbs via qsub (run qsub from that directory so \$PBS_O_WORKDIR resolves correctly), poll with qstat until it finishes, then visualize the resulting output. Use only the paper and whatever you find by exploring output/ and analysis/ under that same directory -- do not assume any configuration or code beyond what's actually there. The workflow consists of three tasks: a producer (simulation) task, an analysis task, and a visualization task. The producer task executes a HACC cosmological simulation using 8 MPI ranks. It generates particle snapshot data representing the state of a dark matter universe at a given timestep. The snapshot is distributed across MPI ranks and contains particle properties including positions, velocities, masses, and gravitational potentials. The analysis task identifies halos in the simulation particle snapshots using a two-step approach. First, it identifies Friends-of-Friends (FOF) halos by linking particles whose separations are below a chosen linking length. For each FOF halo, the halo center is defined as the position of the particle with the minimum gravitational potential. Each FOF halo is then associated with a Spherical Overdensity (SOD) halo by growing spherical shells around the FOF center until the enclosed mean density reaches a specified multiple of the critical density of the universe. The output of this task is a halo catalog containing halo properties such as positions, masses, and characteristic radii (e.g., (R_\Delta), (M_\Delta)). The visualization task generates 2D slices of selected physical fields in the xy-plane, spanning the full simulation box with a fixed thickness of 4 Mpc/h in the z-direction. The slicing plane is positioned to intersect the most massive halo in the simulation box, using its z-coordinate (e.g., z = 179.14 Mpc/h) as the slice center. The task computes and renders the dark matter density field within this slice. The final output of the entire workflow is the dark matter density slice image, which visualizes the projected structure of matter distribution in the simulation volume and highlights the region around the most massive halo. The workflow follows a producer-analysis-visualization pattern in which both downstream tasks depend on the particle snapshot produced by the simulation. Once the snapshot is available, the analysis task produces a halo catalog, and the visualization task generates the final dark matter density slice image for scientific interpretation. The visualizaed image must match the image in the paper.
+  Example (`molecular_nucleation`):
+  > I would like to have a 2-task workflow consisting of one producer and one consumer task. The producer runs a LAMMPS molecular dynamics simulation of crystallization and generates trajectory data. The consumer runs OVITO, which reads the resulting trajectory dump file, identifies diamond structures using the diamond structure identification modifier, renders each frame using the TachyonRenderer, and saves the output as PNG images.
 
+  The full goal text for every other use case (`cosmology`, `eddy_uv`, ...) lives in
+  [`inputs/usecase_descriptions/descriptions.py`](inputs/usecase_descriptions/descriptions.py)
+  rather than being duplicated here — open that file for the exact wording used per domain.
 
-Eddy:
-  I would like to have a 2-task workflow consisting of one producer and one consumer task. The producer runs a Nek5000 computational fluid dynamics simulation of the eddy_uv case — an exact 2D solution to the Navier-Stokes equations based on Walsh's decaying vortex array with an additional translational velocity — using the input files located at /lcrc/project/PEDAL/Nek5000/NekExamples-master/eddy_uv (specifically eddy_uv.rea, eddy_uv.usr, eddy_uv.map, SIZE, and SESSION.NAME) and generates field output files. The consumer reads the resulting Nek5000 field files, computes the stream function from the velocity field, and renders contour plots of the stream function to visualize the eddy vortex pattern as shown in Figure 1 of Walsh (1992), saving the output as PNG images. The producer runs on 8 MPI ranks and the consumer runs on a single process.
+**Paper:**
+- The PDF being reproduced, dropped into `Literature/` and selected with
+  `--paper <1-based index or path>`.
+- Optional — only used when `--combination` is `a` or `b`.
 
-
-Paper:
-
-Config/Data:
-
-
+**Config/Data:**
+- Static input files a workflow needs at runtime (LAMMPS input scripts, force fields,
+  etc.), placed in `data/`.
+- Optional — prompted for interactively at startup (press Enter to select all); if
+  `data/` is empty the run proceeds with no input data.
 
 
 ---
@@ -131,6 +141,39 @@ skills/
 Agents request additional skills on their first tool call via a `skill_requests` field
 (e.g. `["use_cases/cosmology/explorer", "systems/parsl"]`); the relevant environment
 knowledge skill (`local` or `lcrc`) is loaded automatically based on `--env`.
+
+### Adding a New Use Case
+
+Use cases (domains) are auto-discovered from `skills/use_cases/` at runtime — there is
+no registry to edit in `agent_mcp.py` or `mcp_explorer.py`. To add one, using an
+existing domain (e.g. `cosmology`) as a template:
+
+1. **Add the paper.** Drop the PDF into `Literature/`.
+2. **Add the goal text.** Add a new variable to
+   [`inputs/usecase_descriptions/descriptions.py`](inputs/usecase_descriptions/descriptions.py)
+   with the free-text description of the workflow — this is what you'll pass to
+   `--goal` (or paste in when prompted).
+3. **(Optional) add a diagram.** Drop a workflow sketch/figure into
+   `inputs/input_images/` if you want to be able to run with `--combination a` or `c`.
+4. **Write the skill files.** Create `skills/use_cases/<name>/` with the same four
+   files every other use case has:
+   ```
+   skills/use_cases/<name>/
+   ├── orchestrator.SKILL.md
+   ├── planner.SKILL.md
+   ├── installer.SKILL.md
+   └── explorer.SKILL.md
+   ```
+   Copy an existing use case's files as a starting point and rewrite the
+   domain-specific parts (expected packages, task breakdown, engine quirks, etc.) —
+   keep the same section structure each file expects.
+5. **Run it.** Pass `--domain <name>` where `<name>` matches (or substring-matches)
+   the `skills/use_cases/<name>/` folder name — the orchestrator, planner, and
+   explorer each pick up the matching skill files automatically (`_list_skills` in
+   `agent_mcp.py` just lists what's on disk). No code changes are needed anywhere else.
+
+Optionally, add a row for the new domain to the table in
+["What This Project Is"](#what-this-project-is) above so it's discoverable at a glance.
 
 ---
 
@@ -273,6 +316,36 @@ python agent_mcp.py \
 `knowledge/local` skill is loaded automatically, which forbids the agent from
 recommending PBS, MPI, `mpirun`/`srun`, or multi-node configs — everything runs
 single-process on one machine.
+
+---
+
+## Testing a New Simulation Without Pre-Configuring a Use Case
+
+You don't need to go through the full [Adding a New Use Case](#adding-a-new-use-case)
+setup (paper, `descriptions.py` entry, skill files) just to try something new. Upload
+any supporting artifacts you have — a workflow diagram (`--image <path>`, or drop it
+in `inputs/input_images/`), input files in `data/` — skip `--paper`, and use
+`--combination d` (Desc only). Everything else comes from your `--goal`.
+
+Since the goal message is the only thing describing the simulation in this path,
+write one that covers these six considerations:
+
+| Consideration | Ask yourself |
+|---|---|
+| Scientific goal | What should the workflow compute or produce? |
+| Method / software | Which simulator and analysis tools should each task use? |
+| Input data | Is input data provided, or generated by the workflow itself? |
+| Key parameters | Size, steps, resolution, MPI ranks (or leave blank for defaults) |
+| Expected outputs / success criteria | What outputs, and how do we know it worked? |
+| Environment & scale | Local or HPC, and how many processes/ranks/nodes? |
+
+```bash
+python agent_mcp.py \
+  --combination d \
+  --goal "Run a 2-task LAMMPS + OVITO workflow: simulate crystallization, then \
+identify diamond structures and render PNGs with TachyonRenderer. Use 4 MPI ranks \
+locally; success = one PNG per frame showing colored diamond-structure atoms."
+```
 
 ---
 
