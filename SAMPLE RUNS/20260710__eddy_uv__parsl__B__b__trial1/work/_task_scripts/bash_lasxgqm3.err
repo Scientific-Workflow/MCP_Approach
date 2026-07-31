@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && mkdir -p /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && ls -ld /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0'
+--> end executable <--

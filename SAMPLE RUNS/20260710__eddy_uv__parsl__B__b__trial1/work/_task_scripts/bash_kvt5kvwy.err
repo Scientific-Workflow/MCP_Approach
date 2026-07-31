@@ -1,0 +1,4 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && ls -la /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/data/eddy_uv/'
+--> end executable <--
+ls: cannot access '/gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/data/eddy_uv/': No such file or directory

@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && ls -la /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0/*.png /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0/*.gif /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0/*.npz 2>/dev/null | awk '"'"'{print $5, $9}'"'"''
+--> end executable <--

@@ -1,0 +1,7 @@
+=== eddy_uv.nek5000 ===
+ filetemplate: eddy_uv%01d.f%05d
+ firsttimestep: 1
+ numtimesteps:           11
+=== SESSION.NAME ===
+eddy_uv
+/lcrc/project/PEDAL/jacoboh/Nek5000/NekExamples-master/eddy_uv/

@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && cd /lcrc/project/PEDAL/jacoboh/Nek5000/NekExamples-master/eddy_uv/; echo "=== eddy_uv.nek5000 ==="; cat eddy_uv.nek5000; echo "=== SESSION.NAME ==="; cat SESSION.NAME'
+--> end executable <--

@@ -1,0 +1,3 @@
+--> executable follows <--
+bash -lc 'cd /gpfs/fs1/home/jacob.oh/SULI/MCP_Approach/work/run0 && ls -la /lcrc/project/PEDAL/jacoboh/Nek5000/NekExamples-master/eddy_uv/ 2>&1 | head -50; echo "---EXIT:$?---"'
+--> end executable <--

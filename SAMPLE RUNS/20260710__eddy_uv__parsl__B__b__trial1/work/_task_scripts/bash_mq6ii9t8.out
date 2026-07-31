@@ -1,0 +1,32 @@
+-rw-rw----+ 1 jacob.oh cels 328840 Jul 10 13:52 eddy_uv0.f00001
+-rw-rw----+ 1 jacob.oh cels 328840 Jul 10 13:52 eddy_uv0.f00002
+-rw-rw----+ 1 jacob.oh cels 328840 Jul 10 13:53 eddy_uv0.f00003
+-rw-rw----+ 1 jacob.oh cels 328840 Jul 10 13:53 eddy_uv0.f00004
+-rw-rw----+ 1 jacob.oh cels 328840 Jul 10 13:53 eddy_uv0.f00005
+-rw-rw----+ 1 jacob.oh cels 328840 Jul 10 13:53 eddy_uv0.f00006
+-rw-rw----+ 1 jacob.oh cels 328840 Jul 10 13:53 eddy_uv0.f00007
+-rw-rw----+ 1 jacob.oh cels 328840 Jul 10 13:54 eddy_uv0.f00008
+-rw-rw----+ 1 jacob.oh cels 328840 Jul 10 13:54 eddy_uv0.f00009
+-rw-rw----+ 1 jacob.oh cels 328840 Jul 10 13:54 eddy_uv0.f00010
+-rw-rw----+ 1 jacob.oh cels 328840 Jul 10 13:54 eddy_uv0.f00011
+=== tail of log ===
+
+#  nid       tusbc       tdadd       tcrsl       tvdss       tdsum        tgop    qqq    F
+           0  2.2308E-02  1.2136E-02  6.5404E-03  2.9791E-02  6.7484E-02  7.9708E-02 qqq
+           1  3.5807E-02  1.2397E-02  6.6837E-03  4.4321E-02  9.9402E-02  1.7777E-01 qqq
+           2  3.7108E-02  1.2453E-02  6.6610E-03  4.4237E-02  9.9314E-02  1.8460E-01 qqq
+           3  3.5807E-02  1.2377E-02  6.6552E-03  4.3396E-02  9.8609E-02  1.7633E-01 qqq
+           4  3.6324E-02  1.2791E-02  6.6395E-03  4.3529E-02  9.5586E-02  1.8642E-01 qqq
+           5  3.6334E-02  1.2674E-02  6.6245E-03  4.3360E-02  9.4932E-02  1.7770E-01 qqq
+           6  3.5827E-02  1.2741E-02  6.5740E-03  4.3766E-02  9.5215E-02  1.9824E-01 qqq
+           7  3.6290E-02  1.2706E-02  6.5227E-03  4.3140E-02  9.2482E-02  1.7498E-01 qqq
+  
+run successful: dying ...
+  
+  
+total elapsed time             :   2.62793E+00 sec
+total solver time w/o IO       :   2.48713E+00 sec
+time/timestep                  :   2.48713E-03 sec
+avg throughput per timestep    :   6.30444E+05 gridpts/CPUs
+total max memory usage         :   1.31813E+00 GB
+
